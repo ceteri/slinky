@@ -1,8 +1,9 @@
+debug_level	4
 todo_queue_key	todo
 pend_queue_key	pend
 norm_uri_key	norm
 white_list_key	white
-num_threads	100
+num_threads	2
 over_book	2
 request_sleep	2
 max_iterations	3

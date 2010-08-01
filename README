@@ -20,8 +20,8 @@ Requires:
 	http://www.crummy.com/software/BeautifulSoup/
 
 Usage:
-	./src/slinky.py redis_host:port:db config < config.tsv
 	./src/slinky.py redis_host:port:db flush
+	./src/slinky.py redis_host:port:db config < config.tsv
 	./src/slinky.py redis_host:port:db seed < urls.tsv
 	./src/slinky.py redis_host:port:db whitelist < whitelist.tsv
 	./src/slinky.py redis_host:port:db crawl

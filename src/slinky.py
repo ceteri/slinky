@@ -17,40 +17,28 @@ import base64
 import hashlib
 import httplib
 import numpy
-import robotparser
 import redis
+import robotparser
 import sys
 import threading
 import time
 import urllib2
           
 
-## crawler parameters, override via CLI config
-
-DEBUG_LEVEL = 4 # 0
-
-TODO_QUEUE_KEY = "todo"
-PEND_QUEUE_KEY = "pend"
-NORM_URI_KEY = "norm"
-WHITE_LIST_KEY = "white"
-
-NUM_THREADS = 2 # 100
-OVER_BOOK = 1
-REQUEST_SLEEP = 2
-MAX_ITERATIONS = 3
-
-USER_AGENT = "KwizineLoc/1.0.0"
-HTTP_TIMEOUT = 5
-MAX_PAGE_LEN = 500000
-
-
-## global variables
+######################################################################
+## global variables, debugging, dependency injection.. oh my!
 
 red_cli = None
 opener = None
-domain_dict = {}
+
+domain_rules = {}
+conf_param = {}
+
+CONF_PARAM_KEY = "conf"
+conf_param["debug_level"] = "0"
 
 
+######################################################################
 ## class definitions
 
 class ThreadUri (threading.Thread):
@@ -64,21 +52,20 @@ class ThreadUri (threading.Thread):
         self.white_list = white_list
 
 
-    def checkRobots (self, domain, uri):
+    def checkRobots (self, protocol, domain, uri):
         ## check "robots.txt" permission for this domain
 
-        if domain in domain_dict:
-            rp = domain_dict[domain]
+        if domain in domain_rules:
+            rp = domain_rules[domain]
         else:
             rp = robotparser.RobotFileParser()
-            rp.set_url("http://" + domain + "/robots.txt")
+            rp.set_url("/".join([protocol, "", domain, "robots.txt"]))
             rp.read()
+            domain_rules[domain] = rp
 
-            domain_dict[domain] = rp
+        is_allowed = rp.can_fetch(conf_param["user_agent"], uri)
 
-        is_allowed = rp.can_fetch(USER_AGENT, uri)
-
-        if DEBUG_LEVEL > 0:
+        if debug(0):
             print "ROBOTS", is_allowed, uri
 
         return is_allowed
@@ -91,8 +78,8 @@ class ThreadUri (threading.Thread):
         status = str(url_handle.getcode())
         norm_uri = url_handle.geturl()
 
-        # GET the first MAX_PAGE_LEN bytes of HTML
-        raw_html = url_handle.read(MAX_PAGE_LEN)
+        # GET thresholded byte count of HTML content
+        raw_html = url_handle.read(int(conf_param["max_page_len"]))
 
         # determine the content type
 
@@ -120,7 +107,7 @@ class ThreadUri (threading.Thread):
         return status, norm_uri, content_type, date, checksum, b64_html, raw_html
 
 
-    def fetch (self, domain, orig_url):
+    def fetch (self, protocol, domain, orig_url):
         ## attempt to fetch the given URI, collecting the status code
 
         status = "403"
@@ -134,8 +121,8 @@ class ThreadUri (threading.Thread):
         try:
             # apply "robots.txt" restrictions, fetch if allowed
 
-            if self.checkRobots(domain, orig_url):
-                url_handle = urllib2.urlopen(orig_url, None, HTTP_TIMEOUT)
+            if self.checkRobots(protocol, domain, orig_url):
+                url_handle = urllib2.urlopen(orig_url, None, int(conf_param["http_timeout"]))
                 status, norm_uri, content_type, date, checksum, b64_html, raw_html  = self.getPage(url_handle)
 
             # status codes based on HTTP/1.1 spec in RFC 2616:
@@ -165,7 +152,7 @@ class ThreadUri (threading.Thread):
             sys.stderr.write("ValueError: %(err)s\n%(data)s\n" % {"err": str(err), "data": orig_url})
             status = "400"
         else:
-            if DEBUG_LEVEL > 0:
+            if debug(0):
                 print "SUCCESS:", orig_url
 
         return status, norm_uri, content_type, date, checksum, b64_html, raw_html
@@ -190,7 +177,7 @@ class ThreadUri (threading.Thread):
                     # add the absolute URI
                     out_links.add(l)
 
-        if DEBUG_LEVEL > 4:
+        if debug(4):
             print out_links
 
         return out_links
@@ -201,16 +188,16 @@ class ThreadUri (threading.Thread):
 
             [protocol, domain, uuid, orig_url] = self.local_queue.get()
 
-            status, norm_uri, content_type, date, checksum, b64_html, raw_html = self.fetch(domain, orig_url)
+            status, norm_uri, content_type, date, checksum, b64_html, raw_html = self.fetch(protocol, domain, orig_url)
             norm_uuid, norm_uri = getUUID(norm_uri)
             out_links = self.getOutLinks(protocol, domain, raw_html)
 
-            if DEBUG_LEVEL > 0:
+            if debug(0):
                 print domain, norm_uri, status, content_type, date, str(len(raw_html)), checksum
 
             # update the Page Store with fetched/analyzed data
 
-            red_cli.srem(PEND_QUEUE_KEY, uuid)
+            red_cli.srem(conf_param["pend_queue_key"], uuid)
 
             if status.startswith("3"):
                 # push redirected link onto URI Queue
@@ -229,7 +216,7 @@ class ThreadUri (threading.Thread):
             red_cli.hset(norm_uri, "html", b64_html)
 
             # update the "orig_url" -> "norm_uri" mapping, to resolve redirects later
-            red_cli.hset(NORM_URI_KEY, orig_url, norm_uri)
+            red_cli.hset(conf_param["norm_uri_key"], orig_url, norm_uri)
 
             # TODO: outbound links require another lookup to resolve orig_url -> norm_uri mapping
 
@@ -243,13 +230,13 @@ class ThreadUri (threading.Thread):
 
         protocol, domain = getDomain(uri)
 
-        if DEBUG_LEVEL > 0:
-            print "CHECK", domain, self.white_list
+        if debug(0):
+            print "CHECK", protocol, domain, uri
 
         if len(self.white_list) < 1 or domain in self.white_list:
             testSet(uuid, uri)
 
-            if DEBUG_LEVEL > 0:
+            if debug(0):
                 print "ENQUEUE", domain, uuid, uri
 
 
@@ -259,14 +246,15 @@ class ThreadUri (threading.Thread):
                 link_uuid, link_uri = getUUID(link_uri)
                 self.enqueueLink(link_uuid, link_uri)
 
-            # TODO: adjust "throttle" based on aggregate server load (?? Yan, let's define)
             # after "throttled" wait period, signal to queue that the task completed
+            # TODO: adjust "throttle" based on aggregate server load (?? Yan, let's define)
 
-            time.sleep(REQUEST_SLEEP * (1.0 + numpy.random.random()))
+            time.sleep(int(conf_param["request_sleep"]) * (1.0 + numpy.random.random()))
             self.local_queue.task_done()
           
 
 ######################################################################
+## lifecycle methods
 
 def init (host_port_db):
     ## set up the Redis client
@@ -277,21 +265,42 @@ def init (host_port_db):
     return red_cli
 
 
+def debug (level):
+    return int(conf_param["debug_level"]) > level
+
+
+def config ():
+    ## put config params in key/value store, as a distrib cache
+
+    for line in sys.stdin:
+        try:
+            line = line.strip()
+            [param, value] = line.split("\t")
+
+            print "CONFIG", param, value
+            red_cli.hset(CONF_PARAM_KEY, param, value);
+
+        except ValueError, err:
+            sys.stderr.write("ValueError: %(err)s\n%(data)s\n" % {"err": str(err), "data": line})
+        except IndexError, err:
+            sys.stderr.write("IndexError: %(err)s\n%(data)s\n" % {"err": str(err), "data": line})
+
+
 def flush (all):
     ## flush either all of the key/value store, or just the URI Queue
 
     if all:
         red_cli.flushdb()
     else:
-        red_cli.delete(TODO_QUEUE_KEY)
-        red_cli.delete(PEND_QUEUE_KEY)
+        red_cli.delete(conf_param["todo_queue_key"])
+        red_cli.delete(conf_param["pend_queue_key"])
 
 
 def testSet (uuid, uri):
     ## test whether URI has been visited before, then add to URI Queue
 
     if red_cli.setnx(uuid, uri):
-        red_cli.sadd(TODO_QUEUE_KEY, uuid)
+        red_cli.sadd(conf_param["todo_queue_key"], uuid)
 
 
 def seed ():
@@ -303,13 +312,15 @@ def seed ():
             [uri] = line.split("\t")
             uuid, uri = getUUID(uri)
 
-            if DEBUG_LEVEL > 0:
+            if debug(0):
                 print "UUID", uuid, uri
 
             testSet(uuid, uri)
 
         except ValueError, err:
             sys.stderr.write("ValueError: %(err)s\n%(data)s\n" % {"err": str(err), "data": line})
+        except IndexError, err:
+            sys.stderr.write("IndexError: %(err)s\n%(data)s\n" % {"err": str(err), "data": line})
 
 
 def whitelist ():
@@ -320,13 +331,15 @@ def whitelist ():
             line = line.strip()
             [domain] = line.split("\t")
 
-            if DEBUG_LEVEL > 0:
+            if debug(0):
                 print "WHITELISTED", domain
 
-            red_cli.sadd(WHITE_LIST_KEY, domain)
+            red_cli.sadd(conf_param["white_list_key"], domain)
 
         except ValueError, err:
             sys.stderr.write("ValueError: %(err)s\n%(data)s\n" % {"err": str(err), "data": line})
+        except IndexError, err:
+            sys.stderr.write("IndexError: %(err)s\n%(data)s\n" % {"err": str(err), "data": line})
 
 
 def spawnThreads (local_queue, white_list, num_threads):
@@ -360,34 +373,35 @@ def getDomain (uri):
         protocol = l[0]
         domain = l[2]
     except IndexError, err:
+        # may ignore these, defaults get used
         pass
 
     return protocol, domain
 
 
-def drawQueue (local_queue, queue_book_len):
+def drawQueue (local_queue, draw_limit):
     ## draw from the URI Queue to populate local queue with URI fetch tasks
 
-    for n in range(1, queue_book_len):
-        uuid = red_cli.srandmember(TODO_QUEUE_KEY)
+    for n in range(1, draw_limit):
+        uuid = red_cli.srandmember(conf_param["todo_queue_key"])
 
         if not uuid:
             # URI Queue is empty; have we reached DONE condition?
-            pend_len = red_cli.scard(PEND_QUEUE_KEY)
+            pend_len = red_cli.scard(conf_param["pend_queue_key"])
 
-            if DEBUG_LEVEL > 0:
+            if debug(0):
                 print "DONE: URI Queue is now empty"
                 print "PEND", pend_len
 
             return pend_len > 0
 
-        elif red_cli.smove(TODO_QUEUE_KEY, PEND_QUEUE_KEY, uuid):
+        elif red_cli.smove(conf_param["todo_queue_key"], conf_param["pend_queue_key"], uuid):
             # get URI, determine domain
 
             uri = red_cli.get(uuid)
             protocol, domain = getDomain(uri)
 
-            if DEBUG_LEVEL > 0:
+            if debug(0):
                 print "UUID", domain, uuid, uri
 
             # enqueue URI fetch task in local queue
@@ -401,30 +415,31 @@ def crawl ():
     ## draw URI fetch tasks from URI Queue, populate local queue, run tasks in parallel
 
     local_queue = Queue.Queue()
-    white_list = red_cli.smembers(WHITE_LIST_KEY)
+    white_list = red_cli.smembers(conf_param["white_list_key"])
 
-    spawnThreads(local_queue, white_list, NUM_THREADS)
+    spawnThreads(local_queue, white_list, int(conf_param["num_threads"]))
 
     opener = urllib2.build_opener()
-    opener.addheaders = [('User-agent', USER_AGENT), ('Accept-encoding', 'gzip')]
+    opener.addheaders = [("User-agent", conf_param["user_agent"]), ("Accept-encoding", "gzip")]
+
+    draw_limit = int(conf_param["num_threads"]) * int(conf_param["over_book"])
+    drawQueue(local_queue, draw_limit)
 
     has_more = True
     iter = 0
 
-    drawQueue(local_queue, NUM_THREADS * OVER_BOOK)
-
     while has_more:
         local_queue.join()
-        has_more = drawQueue(local_queue, NUM_THREADS * OVER_BOOK)
+        has_more = drawQueue(local_queue, draw_limit)
 
-        if DEBUG_LEVEL > 0:
+        if debug(0):
             print "ITER", iter, has_more
 
-        if iter > MAX_ITERATIONS:
-            break
+        if iter >= int(conf_param["max_iterations"]):
+            has_more = False
         else:
             iter += 1
-            time.sleep(REQUEST_SLEEP)
+            time.sleep(int(conf_param["request_sleep"]))
 
 
 if __name__ == "__main__":
@@ -436,11 +451,12 @@ if __name__ == "__main__":
         # parse command line options
 
         red_cli = init(sys.argv[1])
+        conf_param = red_cli.hgetall(CONF_PARAM_KEY)
         mode = sys.argv[2]
 
         if mode == "config":
-            # TODO: put config params in key/value store, as a distrib cache
-            pass
+            # put config params in key/value store, as a distrib cache
+            config()
         elif mode == "flush":
             # flush data from key/value store
             flush(True) # False
