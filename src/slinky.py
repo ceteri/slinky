@@ -1,6 +1,15 @@
 #!/usr/bin/python
 # encoding: utf-8
 
+## Copyright (C) 2010, Paco Nathan. This work is licensed under the 
+## BSD License. To view a copy of this license, visit:
+##    http://creativecommons.org/licenses/BSD/
+## or send a letter to Creative Commons, 171 Second Street, Suite 300,
+## San Francisco, California, 94105, USA.
+##
+## @author Paco Nathan <ceteri@gmail.com>
+
+
 from BeautifulSoup import BeautifulSoup, SoupStrainer
 import Queue
 import base64
@@ -14,12 +23,13 @@ import time
 import urllib2
           
 
-## static definitions
+## configuration parameters -- override via CLI
       
-TODO_QUEUE = "todo"
-PEND_QUEUE = "pend"
+TODO_QUEUE_KEY = "todo"
+PEND_QUEUE_KEY = "pend"
+NORM_URI_KEY = "norm"
 
-NUM_WORKER_THREADS = 100
+NUM_THREADS = 100
 OVER_BOOK = 2
 REQUEST_SLEEP = 10
 
@@ -33,9 +43,7 @@ MAX_PAGE_LEN = 500000
 debug_level = 4 # 0
 
 red_cli = None
-
-opener = urllib2.build_opener()
-opener.addheaders = [('User-agent', USER_AGENT), ('Accept-encoding', 'gzip')]
+opener = None
 
 
 ## class definitions
@@ -153,11 +161,10 @@ class ThreadUrl (threading.Thread):
 
 
     def dequeueTask (self):
-            # grab next URL from Queue and attempt to fetch its HTML content
+            # pop random/next from URL Queue and attempt to fetch HTML content
 
-            [uuid, orig_url] = self.local_queue.get()
+            [domain, uuid, orig_url] = self.local_queue.get()
 
-            # TODO: determine domain from the orig_url
             # TODO: fetch/apply "robots.txt" restrictions
 
             status, norm_uri, content_type, date, checksum, b64_html, raw_html = self.fetch(orig_url)
@@ -165,20 +172,21 @@ class ThreadUrl (threading.Thread):
             out_links = self.getOutLinks(raw_html)
 
             if debug_level > 0:
-                print norm_uri, status, content_type, date, str(len(raw_html)), checksum
+                print domain, norm_uri, status, content_type, date, str(len(raw_html)), checksum
 
             # update the Page Store with fetched/analyzed data
 
-            red_cli.srem(PEND_QUEUE, uuid)
+            red_cli.srem(PEND_QUEUE_KEY, uuid)
 
             if status.startswith("3"):
-                # TODO: redirect / push onto Queue
+                # TODO: redirect / push onto URL Queue
                 pass
             else:
                 # mark as "visited"
                 red_cli.setnx(norm_uuid, norm_uri)
 
             red_cli.hset(norm_uri, "uuid", norm_uuid)
+            red_cli.hset(norm_uri, "domain", domain)
             red_cli.hset(norm_uri, "status", status)
             red_cli.hset(norm_uri, "date", date)
             red_cli.hset(norm_uri, "content_type", content_type)
@@ -186,7 +194,8 @@ class ThreadUrl (threading.Thread):
             red_cli.hset(norm_uri, "checksum", checksum)
             red_cli.hset(norm_uri, "html", b64_html)
 
-            # TODO: update the orig_url -> norm_uri mapping
+            # update the "orig_url" -> "norm_uri" mapping, to resolve redirects later
+            red_cli.hset(NORM_URI_KEY, orig_url, norm_uri)
 
             # TODO: outbound links require another lookup to resolve orig_url -> norm_uri mapping
 
@@ -197,10 +206,10 @@ class ThreadUrl (threading.Thread):
 
     def run (self):
         while True:
-            # TODO: enqueue outbound links which fit white-listed domain rules
+            # TODO: enqueue outbound links which satisfy white-listed domain rules
             out_links = self.dequeueTask()
 
-            # TODO: adjust "throttle" based on aggregate server load (?? Yan, must define)
+            # TODO: adjust "throttle" based on aggregate server load (?? Yan, let's define)
             # after "throttled" wait period, signal to queue that the task completed
 
             time.sleep(REQUEST_SLEEP)
@@ -209,21 +218,23 @@ class ThreadUrl (threading.Thread):
 
 ######################################################################
 
-def initRedis (host_port_db):
+def init (host_port_db):
     ## set up the Redis client
 
     host, port, db = host_port_db.split(":")
-    return redis.Redis(host=host, port=int(port), db=int(db))
+    red_cli = redis.Redis(host=host, port=int(port), db=int(db))
+
+    return red_cli
 
 
 def flush (all):
-    ## flush either all of the key/value store, or just the Queue
+    ## flush either all of the key/value store, or just the URL Queue
 
     if all:
         red_cli.flushdb()
     else:
-        red_cli.delete(TODO_QUEUE)
-        red_cli.delete(PEND_QUEUE)
+        red_cli.delete(TODO_QUEUE_KEY)
+        red_cli.delete(PEND_QUEUE_KEY)
 
 
 def seed ():
@@ -239,7 +250,7 @@ def seed ():
                 print "UUID", uuid, url
 
             if red_cli.setnx(uuid, url):
-                red_cli.sadd(TODO_QUEUE, uuid)
+                red_cli.sadd(TODO_QUEUE_KEY, uuid)
 
         except ValueError, err:
             sys.stderr.write("ValueError: %(err)s\n%(data)s\n" % {"err": str(err), "data": line})
@@ -267,40 +278,50 @@ def getUUID (url):
 
 
 def drawQueue (local_queue, queue_book_len):
-    ## draw from the Queue to populate local queue with URL fetch tasks
+    ## draw from the URL Queue to populate local queue with URL fetch tasks
 
     for n in range(1, queue_book_len):
-        uuid = red_cli.srandmember(TODO_QUEUE)
+        uuid = red_cli.srandmember(TODO_QUEUE_KEY)
 
         if not uuid:
             # queue is empty; reached our DONE conditions, so we exit
 
             if debug_level > 0:
-                print "DONE: Queue is now empty"
+                print "DONE: URL Queue is now empty"
 
             return False
-        elif red_cli.smove(TODO_QUEUE, PEND_QUEUE, uuid):
-            # attempt to fetch URL
+        elif red_cli.smove(TODO_QUEUE_KEY, PEND_QUEUE_KEY, uuid):
+            # get URL, determine domain
 
             url = red_cli.get(uuid)
+            domain = "foo.com"
+
+            try:
+                domain = url.split("/")[2]
+            except IndexError, err:
+                pass
 
             if debug_level > 0:
-                print "UUID", uuid, url
+                print "UUID", domain, uuid, url
 
-            local_queue.put([uuid, url])
+            # enqueue URL fetch task in local queue
+            local_queue.put([domain, uuid, url])
 
-    # could be more iterations; not DONE
+    # there may be more iterations; not DONE
     return True
 
 
 def crawl ():
-    ## draw URL fetch tasks from Queue, populate local queue, run tasks in parallel
+    ## draw URL fetch tasks from URL Queue, populate local queue, run tasks in parallel
 
     local_queue = Queue.Queue()
-    spawnThreads(local_queue, NUM_WORKER_THREADS)
+    spawnThreads(local_queue, NUM_THREADS)
+
+    opener = urllib2.build_opener()
+    opener.addheaders = [('User-agent', USER_AGENT), ('Accept-encoding', 'gzip')]
 
     while True:
-        has_more = drawQueue(local_queue, NUM_WORKER_THREADS * OVER_BOOK)
+        has_more = drawQueue(local_queue, NUM_THREADS * OVER_BOOK)
 
         # wait on local queue until everything has been processed
         local_queue.join()
@@ -313,21 +334,24 @@ if __name__ == "__main__":
     # verify command line usage
 
     if len(sys.argv) != 3:
-        print "Usage: slinky.py host:port:db [ 'flush' | 'seed' | 'whitelist' | 'crawl' ] < input.txt"
+        print "Usage: slinky.py host:port:db [ 'config' | 'flush' | 'seed' | 'whitelist' | 'crawl' ] < input.txt"
     else:
         # parse command line options
 
-        red_cli = initRedis(sys.argv[1])
+        red_cli = init(sys.argv[1])
         mode = sys.argv[2]
 
-        if mode == "flush":
-            # flush data from the key/value store
+        if mode == "config":
+            # TODO: load config params into key/value store
+            pass
+        elif mode == "flush":
+            # flush data from key/value store
             flush(True) # False
         elif mode == "seed":
-            # seed the Queue with root URLs as starting points
+            # seed the URL Queue with root URLs as starting points
             seed()
         elif mode == "whitelist":
-            # TODO: implement white-listed domain rules as a Redis set
+            # TODO: push white-listed domain rules into key/value store
             pass
         elif mode == "crawl":
             # populate local queue and crawl those URLs
