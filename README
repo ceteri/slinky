@@ -4,3 +4,6 @@ uses MapReduce for running analytics
 
 Requires:
 	http://github.com/andymccurdy/redis-py
+
+Usage:
+	cat urls.txt | ./slinky.py
