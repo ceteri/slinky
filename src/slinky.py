@@ -1,11 +1,12 @@
 #!/usr/bin/python
 # encoding: utf-8
 
-## Copyright (C) 2010, Paco Nathan. This work is licensed under the 
-## BSD License. To view a copy of this license, visit:
+## Copyright (C) 2010, Paco Nathan. This work is licensed under
+## the BSD License. To view a copy of this license, visit:
 ##    http://creativecommons.org/licenses/BSD/
-## or send a letter to Creative Commons, 171 Second Street, Suite 300,
-## San Francisco, California, 94105, USA.
+## or send a letter to:
+##    Creative Commons, 171 Second Street, Suite 300
+##    San Francisco, California, 94105, USA
 ##
 ## @author Paco Nathan <ceteri@gmail.com>
 
@@ -23,16 +24,18 @@ import time
 import urllib2
           
 
-## configuration parameters -- override via CLI
-      
+## crawler parameters, override via CLI config
+
+DEBUG_LEVEL = 4 # 0
+
 TODO_QUEUE_KEY = "todo"
 PEND_QUEUE_KEY = "pend"
 NORM_URI_KEY = "norm"
 WHITE_LIST_KEY = "white"
 
-NUM_THREADS = 100
-OVER_BOOK = 2
-REQUEST_SLEEP = 10
+NUM_THREADS = 2 # 100
+OVER_BOOK = 1
+REQUEST_SLEEP = 2
 
 USER_AGENT = "KwizineLoc/1.0.0"
 HTTP_TIMEOUT = 5
@@ -41,17 +44,16 @@ MAX_PAGE_LEN = 500000
 
 ## global variables
 
-debug_level = 4 # 0
-
 red_cli = None
 opener = None
 domain_dict = {}
+white_list = set([])
 
 
 ## class definitions
 
-class ThreadUrl (threading.Thread):
-    """Threaded URL Fetcher"""
+class ThreadUri (threading.Thread):
+    """Threaded URI Fetcher"""
 
     def __init__ (self, local_queue):
         ## initialize this Thread
@@ -60,7 +62,7 @@ class ThreadUrl (threading.Thread):
         self.local_queue = local_queue
 
 
-    def checkRobots (self, domain, url):
+    def checkRobots (self, domain, uri):
         ## check "robots.txt" permission for this domain
 
         if domain in domain_dict:
@@ -72,22 +74,22 @@ class ThreadUrl (threading.Thread):
 
             domain_dict[domain] = rp
 
-        is_allowed = rp.can_fetch(USER_AGENT, url)
+        is_allowed = rp.can_fetch(USER_AGENT, uri)
 
-        if debug_level > 0:
-            print "ROBOTS", is_allowed, url
+        if DEBUG_LEVEL > 0:
+            print "ROBOTS", is_allowed, uri
 
         return is_allowed
 
 
     def getPage (self, url_handle):
-        ## get HTTP headers and HTML content from a URL handle
+        ## get HTTP headers and HTML content from a URI handle
 
         # keep track of the HTTP status and normalized URI
         status = str(url_handle.getcode())
         norm_uri = url_handle.geturl()
 
-        # GET the first MAX_PAGE_LEN bytes of HTML from url
+        # GET the first MAX_PAGE_LEN bytes of HTML
         raw_html = url_handle.read(MAX_PAGE_LEN)
 
         # determine the content type
@@ -117,7 +119,7 @@ class ThreadUrl (threading.Thread):
 
 
     def fetch (self, domain, orig_url):
-        ## attempt to fetch the given URL, collecting the status code
+        ## attempt to fetch the given URI, collecting the status code
 
         status = "403"
         norm_uri = orig_url
@@ -161,7 +163,7 @@ class ThreadUrl (threading.Thread):
             sys.stderr.write("ValueError: %(err)s\n%(data)s\n" % {"err": str(err), "data": orig_url})
             status = "400"
         else:
-            if debug_level > 0:
+            if DEBUG_LEVEL > 0:
                 print "SUCCESS:", orig_url
 
         return status, norm_uri, content_type, date, checksum, b64_html, raw_html
@@ -179,14 +181,14 @@ class ThreadUrl (threading.Thread):
                 if len(l) > 0 and not l.startswith("javascript") and not l.startswith("#"):
                     out_links.add(l)
 
-        if debug_level > 4:
+        if DEBUG_LEVEL > 4:
             print out_links
 
         return out_links
 
 
     def dequeueTask (self):
-            # pop random/next from URL Queue and attempt to fetch HTML content
+            # pop random/next from URI Queue and attempt to fetch HTML content
 
             [domain, uuid, orig_url] = self.local_queue.get()
 
@@ -194,7 +196,7 @@ class ThreadUrl (threading.Thread):
             norm_uuid, norm_uri = getUUID(norm_uri)
             out_links = self.getOutLinks(raw_html)
 
-            if debug_level > 0:
+            if DEBUG_LEVEL > 0:
                 print domain, norm_uri, status, content_type, date, str(len(raw_html)), checksum
 
             # update the Page Store with fetched/analyzed data
@@ -202,8 +204,8 @@ class ThreadUrl (threading.Thread):
             red_cli.srem(PEND_QUEUE_KEY, uuid)
 
             if status.startswith("3"):
-                # TODO: redirect / push onto URL Queue
-                pass
+                # push redirected link onto URI Queue
+                self.enqueueLink(norm_uuid, norm_uri)
             else:
                 # mark as "visited"
                 red_cli.setnx(norm_uuid, norm_uri)
@@ -227,10 +229,23 @@ class ThreadUrl (threading.Thread):
             return out_links
 
 
+    def enqueueLink (self, uuid, uri):
+        ## enqueue outbound links which satisfy white-listed domain rules
+
+        domain = getDomain(uri)
+
+        if len(white_list) < 1 or domain in white_list:
+            testSet(uuid, uri)
+
+            if DEBUG_LEVEL > 0:
+                print "ENQUEUE", domain, uuid, uri
+
+
     def run (self):
         while True:
-            # TODO: enqueue outbound links which satisfy white-listed domain rules
-            out_links = self.dequeueTask()
+            for link_uri in self.dequeueTask():
+                link_uuid, link_uri = getUUID(link_uri)
+                self.enqueueLink(link_uuid, link_uri)
 
             # TODO: adjust "throttle" based on aggregate server load (?? Yan, let's define)
             # after "throttled" wait period, signal to queue that the task completed
@@ -251,7 +266,7 @@ def init (host_port_db):
 
 
 def flush (all):
-    ## flush either all of the key/value store, or just the URL Queue
+    ## flush either all of the key/value store, or just the URI Queue
 
     if all:
         red_cli.flushdb()
@@ -260,20 +275,26 @@ def flush (all):
         red_cli.delete(PEND_QUEUE_KEY)
 
 
+def testSet (uuid, uri):
+    ## test whether URI has been visited before, then add to URI Queue
+
+    if red_cli.setnx(uuid, uri):
+        red_cli.sadd(TODO_QUEUE_KEY, uuid)
+
+
 def seed ():
-    ## seed the Queue with root URLs as starting points
+    ## seed the Queue with root URIs as starting points
 
     for line in sys.stdin:
         try:
             line = line.strip()
-            [url] = line.split("\t")
-            uuid, url = getUUID(url)
+            [uri] = line.split("\t")
+            uuid, uri = getUUID(uri)
 
-            if debug_level > 0:
-                print "UUID", uuid, url
+            if DEBUG_LEVEL > 0:
+                print "UUID", uuid, uri
 
-            if red_cli.setnx(uuid, url):
-                red_cli.sadd(TODO_QUEUE_KEY, uuid)
+            testSet(uuid, uri)
 
         except ValueError, err:
             sys.stderr.write("ValueError: %(err)s\n%(data)s\n" % {"err": str(err), "data": line})
@@ -287,7 +308,7 @@ def whitelist ():
             line = line.strip()
             [domain] = line.split("\t")
 
-            if debug_level > 0:
+            if DEBUG_LEVEL > 0:
                 print "WHITELISTED", domain
 
             red_cli.sadd(WHITE_LIST_KEY, domain)
@@ -300,59 +321,69 @@ def spawnThreads (local_queue, num_threads):
     ## spawn a pool of threads, passing them the local queue instance
 
     for i in range(num_threads):
-        t = ThreadUrl(local_queue)
+        t = ThreadUri(local_queue)
         t.setDaemon(True)
         t.start()
 
 
-def getUUID (url):
-    ## clean URL so it can be used as a unique key, then make an MD5 has as a UUID
+def getUUID (uri):
+    ## clean URI so it can be used as a unique key, then make an MD5 has as a UUID
 
-    url = url.replace(" ", "+")
-
+    uri = uri.replace(" ", "+")
     m = hashlib.md5()
-    m.update(url)
+    m.update(uri)
     uuid = m.hexdigest()
 
-    return uuid, url
+    return uuid, uri
+
+
+def getDomain (uri):
+    ## extract the domain from the URI
+
+    domain = "foo.com"
+
+    try:
+        domain = uri.split("/")[2]
+    except IndexError, err:
+        pass
+
+    return domain
 
 
 def drawQueue (local_queue, queue_book_len):
-    ## draw from the URL Queue to populate local queue with URL fetch tasks
+    ## draw from the URI Queue to populate local queue with URI fetch tasks
 
     for n in range(1, queue_book_len):
         uuid = red_cli.srandmember(TODO_QUEUE_KEY)
 
         if not uuid:
-            # queue is empty; reached our DONE conditions, so we exit
+            # URI Queue is empty; have we reached DONE condition?
+            pend_len = red_cli.scard(PEND_QUEUE_KEY)
 
-            if debug_level > 0:
-                print "DONE: URL Queue is now empty"
+            if DEBUG_LEVEL > 0:
+                print "DONE: URI Queue is now empty"
+                print "PEND", pend_len
 
-            return False
+            return pend_len > 0
+
         elif red_cli.smove(TODO_QUEUE_KEY, PEND_QUEUE_KEY, uuid):
-            # get URL, determine domain
+            # get URI, determine domain
 
-            url = red_cli.get(uuid)
-            domain = "foo.com"
+            uri = red_cli.get(uuid)
+            domain = getDomain(uri)
 
-            try:
-                domain = url.split("/")[2]
-            except IndexError, err:
-                pass
+            if DEBUG_LEVEL > 0:
+                print "UUID", domain, uuid, uri
 
-            if debug_level > 0:
-                print "UUID", domain, uuid, url
-
-            # enqueue URL fetch task in local queue
-            local_queue.put([domain, uuid, url])
+            # enqueue URI fetch task in local queue
+            local_queue.put([domain, uuid, uri])
 
     # there may be more iterations; not DONE
     return True
 
 
 def crawl ():
-    ## draw URL fetch tasks from URL Queue, populate local queue, run tasks in parallel
+    ## draw URI fetch tasks from URI Queue, populate local queue, run tasks in parallel
 
     local_queue = Queue.Queue()
     spawnThreads(local_queue, NUM_THREADS)
@@ -360,14 +391,25 @@ def crawl ():
     opener = urllib2.build_opener()
     opener.addheaders = [('User-agent', USER_AGENT), ('Accept-encoding', 'gzip')]
 
-    while True:
+    white_list = red_cli.smembers(WHITE_LIST_KEY)
+    has_more = True
+    iter = 0
+
+    drawQueue(local_queue, NUM_THREADS * OVER_BOOK)
+
+    while has_more:
+        local_queue.join()
         has_more = drawQueue(local_queue, NUM_THREADS * OVER_BOOK)
 
-        # wait on local queue until everything has been processed
-        local_queue.join()
+        if DEBUG_LEVEL > 0:
+            print "ITER", iter, has_more
 
-        if not has_more:
+        time.sleep(REQUEST_SLEEP)
+
+        if iter > 2:
             break
+        else:
+            iter += 1
 
 
 if __name__ == "__main__":
@@ -388,11 +430,11 @@ if __name__ == "__main__":
             # flush data from key/value store
             flush(True) # False
         elif mode == "seed":
-            # seed the URL Queue with root URLs as starting points
+            # seed the URI Queue with root URIs as starting points
             seed()
         elif mode == "whitelist":
             # push white-listed domain rules into key/value store
             whitelist()
         elif mode == "crawl":
-            # populate local queue and crawl those URLs
+            # populate local queue and crawl those URIs
             crawl()
