@@ -4,7 +4,8 @@ norm_uri_key	norm
 white_list_key	white
 num_threads	100
 over_book	2
-request_sleep	10
+request_sleep	2
+max_iterations	3
 user_agent	Mozilla/5.0 (Macintosh; U; Intel Mac OS X 10.5; en-US; rv:1.9.0.10) Gecko/2009042315 Firefox/3.0.10
 http_timeout	5
 max_page_len	500000

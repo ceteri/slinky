@@ -16,6 +16,7 @@ import Queue
 import base64
 import hashlib
 import httplib
+import numpy
 import robotparser
 import redis
 import sys
@@ -36,6 +37,7 @@ WHITE_LIST_KEY = "white"
 NUM_THREADS = 2 # 100
 OVER_BOOK = 1
 REQUEST_SLEEP = 2
+MAX_ITERATIONS = 3
 
 USER_AGENT = "KwizineLoc/1.0.0"
 HTTP_TIMEOUT = 5
@@ -47,7 +49,6 @@ MAX_PAGE_LEN = 500000
 red_cli = None
 opener = None
 domain_dict = {}
-white_list = set([])
 
 
 ## class definitions
@@ -55,11 +56,12 @@ white_list = set([])
 class ThreadUri (threading.Thread):
     """Threaded URI Fetcher"""
 
-    def __init__ (self, local_queue):
+    def __init__ (self, local_queue, white_list):
         ## initialize this Thread
 
         threading.Thread.__init__(self)
         self.local_queue = local_queue
+        self.white_list = white_list
 
 
     def checkRobots (self, domain, uri):
@@ -169,7 +171,7 @@ class ThreadUri (threading.Thread):
         return status, norm_uri, content_type, date, checksum, b64_html, raw_html
 
 
-    def getOutLinks (self, raw_html):
+    def getOutLinks (self, protocol, domain, raw_html):
         ## scan for outbound web links in the fetched HTML content
 
         out_links = set([])
@@ -178,7 +180,14 @@ class ThreadUri (threading.Thread):
             if link.has_key("href"):
                 l = link["href"]
 
-                if len(l) > 0 and not l.startswith("javascript") and not l.startswith("#"):
+                if len(l) < 1 or l.startswith("javascript") or l.startswith("#"):
+                    # ignore non-links
+                    pass
+                elif l.startswith("/"):
+                    # reconstruct absolute URI from relative URI
+                    out_links.add("/".join([protocol, "", domain]) + l)
+                else:
+                    # add the absolute URI
                     out_links.add(l)
 
         if DEBUG_LEVEL > 4:
@@ -190,11 +199,11 @@ class ThreadUri (threading.Thread):
     def dequeueTask (self):
             # pop random/next from URI Queue and attempt to fetch HTML content
 
-            [domain, uuid, orig_url] = self.local_queue.get()
+            [protocol, domain, uuid, orig_url] = self.local_queue.get()
 
             status, norm_uri, content_type, date, checksum, b64_html, raw_html = self.fetch(domain, orig_url)
             norm_uuid, norm_uri = getUUID(norm_uri)
-            out_links = self.getOutLinks(raw_html)
+            out_links = self.getOutLinks(protocol, domain, raw_html)
 
             if DEBUG_LEVEL > 0:
                 print domain, norm_uri, status, content_type, date, str(len(raw_html)), checksum
@@ -232,9 +241,12 @@ class ThreadUri (threading.Thread):
     def enqueueLink (self, uuid, uri):
         ## enqueue outbound links which satisfy white-listed domain rules
 
-        domain = getDomain(uri)
+        protocol, domain = getDomain(uri)
 
-        if len(white_list) < 1 or domain in white_list:
+        if DEBUG_LEVEL > 0:
+            print "CHECK", domain, self.white_list
+
+        if len(self.white_list) < 1 or domain in self.white_list:
             testSet(uuid, uri)
 
             if DEBUG_LEVEL > 0:
@@ -250,7 +262,7 @@ class ThreadUri (threading.Thread):
             # TODO: adjust "throttle" based on aggregate server load (?? Yan, let's define)
             # after "throttled" wait period, signal to queue that the task completed
 
-            time.sleep(REQUEST_SLEEP)
+            time.sleep(REQUEST_SLEEP * (1.0 + numpy.random.random()))
             self.local_queue.task_done()
           
 
@@ -317,11 +329,11 @@ def whitelist ():
             sys.stderr.write("ValueError: %(err)s\n%(data)s\n" % {"err": str(err), "data": line})
 
 
-def spawnThreads (local_queue, num_threads):
+def spawnThreads (local_queue, white_list, num_threads):
     ## spawn a pool of threads, passing them the local queue instance
 
     for i in range(num_threads):
-        t = ThreadUri(local_queue)
+        t = ThreadUri(local_queue, white_list)
         t.setDaemon(True)
         t.start()
 
@@ -340,14 +352,17 @@ def getUUID (uri):
 def getDomain (uri):
     ## extract the domain from the URI
 
+    protocol = "http:"
     domain = "foo.com"
 
     try:
-        domain = uri.split("/")[2]
+        l = uri.split("/")
+        protocol = l[0]
+        domain = l[2]
     except IndexError, err:
         pass
 
-    return domain
+    return protocol, domain
 
 
 def drawQueue (local_queue, queue_book_len):
@@ -370,13 +385,13 @@ def drawQueue (local_queue, queue_book_len):
             # get URI, determine domain
 
             uri = red_cli.get(uuid)
-            domain = getDomain(uri)
+            protocol, domain = getDomain(uri)
 
             if DEBUG_LEVEL > 0:
                 print "UUID", domain, uuid, uri
 
             # enqueue URI fetch task in local queue
-            local_queue.put([domain, uuid, uri])
+            local_queue.put([protocol, domain, uuid, uri])
 
     # there may be more iterations; not DONE
     return True
@@ -386,12 +401,13 @@ def crawl ():
     ## draw URI fetch tasks from URI Queue, populate local queue, run tasks in parallel
 
     local_queue = Queue.Queue()
-    spawnThreads(local_queue, NUM_THREADS)
+    white_list = red_cli.smembers(WHITE_LIST_KEY)
+
+    spawnThreads(local_queue, white_list, NUM_THREADS)
 
     opener = urllib2.build_opener()
     opener.addheaders = [('User-agent', USER_AGENT), ('Accept-encoding', 'gzip')]
 
-    white_list = red_cli.smembers(WHITE_LIST_KEY)
     has_more = True
     iter = 0
 
@@ -404,12 +420,11 @@ def crawl ():
         if DEBUG_LEVEL > 0:
             print "ITER", iter, has_more
 
-        time.sleep(REQUEST_SLEEP)
-
-        if iter > 2:
+        if iter > MAX_ITERATIONS:
             break
         else:
             iter += 1
+            time.sleep(REQUEST_SLEEP)
 
 
 if __name__ == "__main__":
@@ -424,7 +439,7 @@ if __name__ == "__main__":
         mode = sys.argv[2]
 
         if mode == "config":
-            # TODO: load config params into key/value store
+            # TODO: put config params in key/value store, as a distrib cache
             pass
         elif mode == "flush":
             # flush data from key/value store
