@@ -1,10 +1,12 @@
-high-performance web crawler and text analytics in Python
-uses Redis for a key/value store
-uses MapReduce for running analytics
+Slinky provides high-performance web crawler and text analytics in Python.
+
+  * uses Redis key/value store for both URL Queue and Page Store
+  * uses Hadoop, R, Gephi for text analytics and link analytics
+
 
 Requires:
 	http://github.com/andymccurdy/redis-py
 	http://www.crummy.com/software/BeautifulSoup/
 
 Usage:
-	cat urls.txt | ./slinky.py
+	cat urls.txt | ./slinky.py redis_host:port:db [ flush | seed | whitelist | crawl ]
