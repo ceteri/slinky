@@ -28,6 +28,7 @@ import urllib2
 TODO_QUEUE_KEY = "todo"
 PEND_QUEUE_KEY = "pend"
 NORM_URI_KEY = "norm"
+WHITE_LIST_KEY = "white"
 
 NUM_THREADS = 100
 OVER_BOOK = 2
@@ -126,13 +127,15 @@ class ThreadUrl (threading.Thread):
         b64_html = ""
         raw_html = ""
 
-        # status codes based on HTTP/1.1 spec in RFC 2616:
-        # http://www.w3.org/Protocols/rfc2616/rfc2616-sec10.html
-
         try:
+            # apply "robots.txt" restrictions, fetch if allowed
+
             if self.checkRobots(domain, orig_url):
                 url_handle = urllib2.urlopen(orig_url, None, HTTP_TIMEOUT)
                 status, norm_uri, content_type, date, checksum, b64_html, raw_html  = self.getPage(url_handle)
+
+            # status codes based on HTTP/1.1 spec in RFC 2616:
+            # http://www.w3.org/Protocols/rfc2616/rfc2616-sec10.html
 
         except httplib.InvalidURL, err:
             sys.stderr.write("HTTP InvalidURL: %(err)s\n%(data)s\n" % {"err": str(err), "data": orig_url})
@@ -186,8 +189,6 @@ class ThreadUrl (threading.Thread):
             # pop random/next from URL Queue and attempt to fetch HTML content
 
             [domain, uuid, orig_url] = self.local_queue.get()
-
-            # TODO: fetch/apply "robots.txt" restrictions
 
             status, norm_uri, content_type, date, checksum, b64_html, raw_html = self.fetch(domain, orig_url)
             norm_uuid, norm_uri = getUUID(norm_uri)
@@ -273,6 +274,23 @@ def seed ():
 
             if red_cli.setnx(uuid, url):
                 red_cli.sadd(TODO_QUEUE_KEY, uuid)
+
+        except ValueError, err:
+            sys.stderr.write("ValueError: %(err)s\n%(data)s\n" % {"err": str(err), "data": line})
+
+
+def whitelist ():
+    ## push white-listed domain rules into key/value store
+
+    for line in sys.stdin:
+        try:
+            line = line.strip()
+            [domain] = line.split("\t")
+
+            if debug_level > 0:
+                print "WHITELISTED", domain
+
+            red_cli.sadd(WHITE_LIST_KEY, domain)
 
         except ValueError, err:
             sys.stderr.write("ValueError: %(err)s\n%(data)s\n" % {"err": str(err), "data": line})
@@ -373,8 +391,8 @@ if __name__ == "__main__":
             # seed the URL Queue with root URLs as starting points
             seed()
         elif mode == "whitelist":
-            # TODO: push white-listed domain rules into key/value store
-            pass
+            # push white-listed domain rules into key/value store
+            whitelist()
         elif mode == "crawl":
             # populate local queue and crawl those URLs
             crawl()
