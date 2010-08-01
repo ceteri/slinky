@@ -4,6 +4,7 @@ uses MapReduce for running analytics
 
 Requires:
 	http://github.com/andymccurdy/redis-py
+	http://www.crummy.com/software/BeautifulSoup/
 
 Usage:
 	cat urls.txt | ./slinky.py

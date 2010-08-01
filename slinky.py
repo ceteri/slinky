@@ -1,11 +1,11 @@
 #!/usr/bin/python
 # encoding: utf-8
 
+from BeautifulSoup import BeautifulSoup, SoupStrainer
 import Queue
 import base64
 import hashlib
 import httplib
-import json
 import robotparser
 import redis
 import sys
@@ -151,34 +151,67 @@ class ThreadUrl (threading.Thread):
         return status, norm_uri, content_type, date, checksum, encoded, page
 
 
-    def run (self):
-        while True:
-            # grab next url from queue and attempt to fetch its HTML content
+    def getOutLinks (self, page):
+        # scan for outbound web links in this fetched HTML content
+
+        out_links = set([])
+
+        for link in BeautifulSoup(page, parseOnlyThese=SoupStrainer("a")):
+            if link.has_key("href"):
+                l = link["href"]
+
+                if not l.startswith("javascript") and not l.startswith("#"):
+                    out_links.add(l)
+
+        if debug:
+            print out_links
+
+        return out_links
+
+
+    def dequeueTask (self):
+            # grab next URL from Queue and attempt to fetch its HTML content
+
             [uuid, url] = self.queue.get()
             status, norm_uri, content_type, date, checksum, encoded, page = self.fetch(url)
+
             norm_uuid, norm_uri = getUUID(norm_uri)
+            out_links = self.getOutLinks(page)
 
             if debug:
-                print norm_uri, json.dumps([status, content_type, date, str(len(page)), checksum])
+                print norm_uri, status, content_type, date, str(len(page)), checksum
 
-            # update the Page Store
+            # update the Page Store with fetched/analyzed data
 
             red_cli.srem("pend", uuid)
 
             if status.startswith("3"):
-                # redirect / don't mark as "visited"
+                # TODO: redirect / push onto Queue
                 pass
             else:
+                # mark as "visited"
                 red_cli.setnx(norm_uuid, norm_uri)
 
+            red_cli.hset(norm_uri, "uuid", norm_uuid)
             red_cli.hset(norm_uri, "status", status)
             red_cli.hset(norm_uri, "content_type", content_type)
             red_cli.hset(norm_uri, "date", date)
             red_cli.hset(norm_uri, "page_len", str(len(page)))
             red_cli.hset(norm_uri, "checksum", checksum)
             red_cli.hset(norm_uri, "html", encoded)
+            red_cli.hset(norm_uri, "out_links", "\t".join(out_links))
 
-            # after a "throttle" wait period, signal to queue that job is done
+            return out_links
+
+
+    def run (self):
+        while True:
+            out_links = self.dequeueTask()
+
+            # TODO: enqueue outbound links which fit domain rules
+
+            # after "throttled" wait period, signal to queue that the task completed
+
             time.sleep(REQUEST_SLEEP)
             self.queue.task_done()
           
