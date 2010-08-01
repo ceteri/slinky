@@ -1,0 +1,6 @@
+high-performance web crawler and text analytics in Python
+uses Redis for a key/value store
+uses MapReduce for running analytics
+
+Requires:
+	http://github.com/andymccurdy/redis-py
