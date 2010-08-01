@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<project
+ name="slinky"
+ default="clean"
+ basedir="."
+>
+<description>
+Ant build script for Slinky
+    Paco Nathan ceteri@gmail.com
+    http://github.com/ceteri/slinky
+</description>
+
+<target
+ name="clean"
+ description="remove temp files"
+>
+ <defaultexcludes remove="**/*~"/>
+ <delete>
+ <fileset dir=".">
+   <include name="**/*~"/>
+ </fileset>
+ </delete>
+</target>
+
+</project>

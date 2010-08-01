@@ -44,6 +44,7 @@ debug_level = 4 # 0
 
 red_cli = None
 opener = None
+domain_dict = {}
 
 
 ## class definitions
@@ -56,6 +57,26 @@ class ThreadUrl (threading.Thread):
 
         threading.Thread.__init__(self)
         self.local_queue = local_queue
+
+
+    def checkRobots (self, domain, url):
+        ## check "robots.txt" permission for this domain
+
+        if domain in domain_dict:
+            rp = domain_dict[domain]
+        else:
+            rp = robotparser.RobotFileParser()
+            rp.set_url("http://" + domain + "/robots.txt")
+            rp.read()
+
+            domain_dict[domain] = rp
+
+        is_allowed = rp.can_fetch(USER_AGENT, url)
+
+        if debug_level > 0:
+            print "ROBOTS", is_allowed, url
+
+        return is_allowed
 
 
     def getPage (self, url_handle):
@@ -94,10 +115,10 @@ class ThreadUrl (threading.Thread):
         return status, norm_uri, content_type, date, checksum, b64_html, raw_html
 
 
-    def fetch (self, orig_url):
+    def fetch (self, domain, orig_url):
         ## attempt to fetch the given URL, collecting the status code
 
-        status = "0"
+        status = "403"
         norm_uri = orig_url
         content_type = ""
         date = ""
@@ -109,8 +130,9 @@ class ThreadUrl (threading.Thread):
         # http://www.w3.org/Protocols/rfc2616/rfc2616-sec10.html
 
         try:
-            url_handle = urllib2.urlopen(orig_url, None, HTTP_TIMEOUT)
-            status, norm_uri, content_type, date, checksum, b64_html, raw_html  = self.getPage(url_handle)
+            if self.checkRobots(domain, orig_url):
+                url_handle = urllib2.urlopen(orig_url, None, HTTP_TIMEOUT)
+                status, norm_uri, content_type, date, checksum, b64_html, raw_html  = self.getPage(url_handle)
 
         except httplib.InvalidURL, err:
             sys.stderr.write("HTTP InvalidURL: %(err)s\n%(data)s\n" % {"err": str(err), "data": orig_url})
@@ -167,7 +189,7 @@ class ThreadUrl (threading.Thread):
 
             # TODO: fetch/apply "robots.txt" restrictions
 
-            status, norm_uri, content_type, date, checksum, b64_html, raw_html = self.fetch(orig_url)
+            status, norm_uri, content_type, date, checksum, b64_html, raw_html = self.fetch(domain, orig_url)
             norm_uuid, norm_uri = getUUID(norm_uri)
             out_links = self.getOutLinks(raw_html)
 
