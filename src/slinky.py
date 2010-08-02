@@ -12,6 +12,7 @@
 
 
 from BeautifulSoup import BeautifulSoup, SoupStrainer
+from datetime import datetime, timedelta
 import Queue
 import base64
 import hashlib
@@ -27,6 +28,9 @@ import urllib2
 
 ######################################################################
 ## global variables, debugging, dependency injection.. oh my!
+
+start_time = datetime.now()
+task_counter = 0
 
 red_cli = None
 opener = None
@@ -195,31 +199,32 @@ class ThreadUri (threading.Thread):
             if debug(0):
                 print domain, norm_uri, status, content_type, date, str(len(raw_html)), checksum
 
+            # update the "orig_url" -> "norm_uri" mapping, to resolve redirects later
+
+            red_cli.hset(conf_param["norm_uri_key"], orig_url, norm_uri)
+            out_links = resolveLinks(out_links)
+
             # update the Page Store with fetched/analyzed data
 
             red_cli.srem(conf_param["pend_queue_key"], uuid)
 
             if status.startswith("3"):
-                # push redirected link onto URI Queue
+                # push HTTP-redirected link onto URI Queue
                 self.enqueueLink(norm_uuid, norm_uri)
             else:
                 # mark as "visited"
                 red_cli.setnx(norm_uuid, norm_uri)
+                red_cli.lpush(conf_param["needs_text_key"], norm_uri)
 
-            red_cli.hset(norm_uri, "uuid", norm_uuid)
-            red_cli.hset(norm_uri, "domain", domain)
-            red_cli.hset(norm_uri, "status", status)
-            red_cli.hset(norm_uri, "date", date)
-            red_cli.hset(norm_uri, "content_type", content_type)
-            red_cli.hset(norm_uri, "page_len", str(len(raw_html)))
-            red_cli.hset(norm_uri, "checksum", checksum)
-            red_cli.hset(norm_uri, "html", b64_html)
-
-            # update the "orig_url" -> "norm_uri" mapping, to resolve redirects later
-            red_cli.hset(conf_param["norm_uri_key"], orig_url, norm_uri)
-
-            out_links = resolveLinks(out_links)
-            red_cli.hset(norm_uri, "out_links", "\t".join(out_links))
+                red_cli.hset(norm_uri, "uuid", norm_uuid)
+                red_cli.hset(norm_uri, "domain", domain)
+                red_cli.hset(norm_uri, "status", status)
+                red_cli.hset(norm_uri, "date", date)
+                red_cli.hset(norm_uri, "content_type", content_type)
+                red_cli.hset(norm_uri, "page_len", str(len(raw_html)))
+                red_cli.hset(norm_uri, "checksum", checksum)
+                red_cli.hset(norm_uri, "html", b64_html)
+                red_cli.hset(norm_uri, "out_links", "\t".join(out_links))
 
             return out_links
 
@@ -240,10 +245,19 @@ class ThreadUri (threading.Thread):
 
 
     def run (self):
+        global task_counter
+
         while True:
             for link_uri in self.dequeueTask():
                 link_uuid, link_uri = getUUID(link_uri)
                 self.enqueueLink(link_uuid, link_uri)
+
+            # progress report
+
+            if debug(0):
+                task_counter += 1
+                td = (datetime.now() - start_time)
+                print "TIME", task_counter, (td.microseconds + (td.seconds + td.days * 24 * 3600) * 10**6) / 10**6
 
             # after "throttled" wait period, signal to queue that the task completed
             # TODO: adjust "throttle" based on aggregate server load (?? Yan, let's define)
@@ -465,6 +479,8 @@ if __name__ == "__main__":
     if len(sys.argv) != 3:
         print "Usage: slinky.py host:port:db [ 'config' | 'flush' | 'seed' | 'whitelist' | 'crawl' ] < input.txt"
     else:
+        print "START", start_time
+
         # parse command line options
 
         red_cli = init(sys.argv[1])
