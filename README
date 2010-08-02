@@ -8,11 +8,11 @@
 ## @author Paco Nathan <ceteri@gmail.com>
 
 
-Slinky provides high-performance web crawler and text analytics in
-Python.
+Slinky provides high-performance Web Crawler and Text Analytics 
+implemented in Python.
 
-  * uses Redis key/value store for both URL Queue and Page Store
-  * uses Hadoop, R, Gephi for text analytics and link analytics
+  * uses Redis key/value store for both URI Queue and Page Store
+  * uses Hadoop, R, Gephi for Text Analytics and Link Analytics
 
 
 Requires:
