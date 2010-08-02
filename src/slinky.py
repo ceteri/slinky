@@ -146,7 +146,7 @@ class ThreadUri (threading.Thread):
             status = str(err.code)
         except IOError, err:
             sys.stderr.write("IOError: %(err)s\n%(data)s\n" % {"err": str(err), "data": orig_url})
-            status = str(err.code)
+            status = "400"
         except ValueError, err:
             # unknown url type: http
             sys.stderr.write("ValueError: %(err)s\n%(data)s\n" % {"err": str(err), "data": orig_url})
@@ -218,8 +218,7 @@ class ThreadUri (threading.Thread):
             # update the "orig_url" -> "norm_uri" mapping, to resolve redirects later
             red_cli.hset(conf_param["norm_uri_key"], orig_url, norm_uri)
 
-            # TODO: outbound links require another lookup to resolve orig_url -> norm_uri mapping
-
+            out_links = resolveLinks(out_links)
             red_cli.hset(norm_uri, "out_links", "\t".join(out_links))
 
             return out_links
@@ -275,10 +274,12 @@ def config ():
     for line in sys.stdin:
         try:
             line = line.strip()
-            [param, value] = line.split("\t")
 
-            print "CONFIG", param, value
-            red_cli.hset(CONF_PARAM_KEY, param, value);
+            if len(line) > 0 and not line.startswith("#"):
+                [param, value] = line.split("\t")
+
+                print "CONFIG", param, value
+                red_cli.hset(CONF_PARAM_KEY, param, value);
 
         except ValueError, err:
             sys.stderr.write("ValueError: %(err)s\n%(data)s\n" % {"err": str(err), "data": line})
@@ -377,6 +378,22 @@ def getDomain (uri):
         pass
 
     return protocol, domain
+
+
+def resolveLinks (out_links):
+    ## perform lookup on outbound links to resolve orig_url -> norm_uri mapping
+
+    resolved_links = set([])
+
+    for link_uri in out_links:
+        norm_uri = red_cli.hget(conf_param["norm_uri_key"], link_uri)
+
+        if norm_uri:
+            resolved_links.add(norm_uri)
+        else:
+            resolved_links.add(link_uri)
+
+    return resolved_links
 
 
 def drawQueue (local_queue, draw_limit):
