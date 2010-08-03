@@ -147,7 +147,7 @@ class ThreadUri (threading.Thread):
             status = str(err.code)
         except urllib2.URLError, err:
             sys.stderr.write("URLError: %(err)s\n%(data)s\n" % {"err": str(err), "data": orig_url})
-            status = str(err.code)
+            status = "400"
         except IOError, err:
             sys.stderr.write("IOError: %(err)s\n%(data)s\n" % {"err": str(err), "data": orig_url})
             status = "400"
