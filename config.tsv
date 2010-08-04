@@ -4,7 +4,6 @@ debug_level	4
 
 todo_queue_key	todo
 pend_queue_key	pend
-norm_uri_key	norm
 white_list_key	white
 needs_text_key	needs.text
 needs_link_key	needs.link

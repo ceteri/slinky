@@ -20,6 +20,7 @@ import httplib
 import numpy
 import redis
 import robotparser
+import string
 import sys
 import threading
 import time
@@ -69,7 +70,7 @@ class ThreadUri (threading.Thread):
 
         is_allowed = rp.can_fetch(conf_param["user_agent"], uri)
 
-        if debug(0):
+        if debug(3):
             print "ROBOTS", is_allowed, uri
 
         return is_allowed
@@ -156,8 +157,10 @@ class ThreadUri (threading.Thread):
             sys.stderr.write("ValueError: %(err)s\n%(data)s\n" % {"err": str(err), "data": orig_url})
             status = "400"
         else:
-            if debug(0):
+            if debug(3):
                 print "SUCCESS:", orig_url
+
+        # TODO: capture explanation text for status code
 
         return status, norm_uri, content_type, date, checksum, b64_html, raw_html
 
@@ -188,45 +191,53 @@ class ThreadUri (threading.Thread):
 
 
     def dequeueTask (self):
-            # pop random/next from URI Queue and attempt to fetch HTML content
+        # pop random/next from URI Queue and attempt to fetch HTML content
 
-            [protocol, domain, uuid, orig_url] = self.local_queue.get()
+        [protocol, domain, uuid, orig_url] = self.local_queue.get()
+        crawl_start = datetime.now()
 
-            status, norm_uri, content_type, date, checksum, b64_html, raw_html = self.fetch(protocol, domain, orig_url)
-            norm_uuid, norm_uri = getUUID(norm_uri)
-            out_links = self.getOutLinks(protocol, domain, raw_html)
+        status, norm_uri, content_type, date, checksum, b64_html, raw_html = self.fetch(protocol, domain, orig_url)
+        td = (datetime.now() - crawl_start)
+        crawl_time = (td.microseconds + (td.seconds + td.days * 24 * 3600) * 10**6) / 10**6
 
-            if debug(0):
-                print domain, norm_uri, status, content_type, date, str(len(raw_html)), checksum
+        norm_uuid, norm_uri = getUUID(norm_uri)
+        out_links = self.getOutLinks(protocol, domain, raw_html)
 
-            # update the "orig_url" -> "norm_uri" mapping, to resolve redirects later
+        if debug(0):
+            print domain, norm_uri, status, content_type, date, str(len(raw_html)), checksum, crawl_time
 
-            red_cli.hset(conf_param["norm_uri_key"], orig_url, norm_uri)
-            out_links = resolveLinks(out_links)
+        # update the Page Store with fetched/analyzed data
 
-            # update the Page Store with fetched/analyzed data
+        red_cli.srem(conf_param["pend_queue_key"], uuid)
 
-            red_cli.srem(conf_param["pend_queue_key"], uuid)
+        if status.startswith("3"):
+            # push HTTP-redirected link onto URI Queue
+            self.enqueueLink(norm_uuid, norm_uri)
+        else:
+            # mark as "visited"
+            red_cli.setnx(norm_uuid, norm_uri)
+            red_cli.lpush(conf_param["needs_text_key"], norm_uri)
 
-            if status.startswith("3"):
-                # push HTTP-redirected link onto URI Queue
-                self.enqueueLink(norm_uuid, norm_uri)
-            else:
-                # mark as "visited"
-                red_cli.setnx(norm_uuid, norm_uri)
-                red_cli.lpush(conf_param["needs_text_key"], norm_uri)
+        # resolve redirects among the outbound links
 
-                red_cli.hset(norm_uri, "uuid", norm_uuid)
-                red_cli.hset(norm_uri, "domain", domain)
-                red_cli.hset(norm_uri, "status", status)
-                red_cli.hset(norm_uri, "date", date)
-                red_cli.hset(norm_uri, "content_type", content_type)
-                red_cli.hset(norm_uri, "page_len", str(len(raw_html)))
-                red_cli.hset(norm_uri, "checksum", checksum)
-                red_cli.hset(norm_uri, "html", b64_html)
-                red_cli.hset(norm_uri, "out_links", "\t".join(out_links))
+        red_cli.hset(orig_url, "norm_uri", norm_uri)
+        out_links = resolveLinks(out_links)
 
-            return out_links
+        red_cli.hset(norm_uri, "out_links", "\t".join(out_links))
+
+        # persist the other metadata + data
+
+        red_cli.hset(norm_uri, "uuid", norm_uuid)
+        red_cli.hset(norm_uri, "domain", domain)
+        red_cli.hset(norm_uri, "status", status)
+        red_cli.hset(norm_uri, "date", date)
+        red_cli.hset(norm_uri, "content_type", content_type)
+        red_cli.hset(norm_uri, "page_len", str(len(raw_html)))
+        red_cli.hset(norm_uri, "crawl_time", crawl_time)
+        red_cli.hset(norm_uri, "checksum", checksum)
+        red_cli.hset(norm_uri, "html", b64_html)
+
+        return out_links
 
 
     def enqueueLink (self, uuid, uri):
@@ -234,13 +245,13 @@ class ThreadUri (threading.Thread):
 
         protocol, domain = getDomain(uri)
 
-        if debug(0):
+        if debug(3):
             print "CHECK", protocol, domain, uri
 
         if len(self.white_list) < 1 or domain in self.white_list:
             testSet(uuid, uri)
 
-            if debug(0):
+            if debug(3):
                 print "ENQUEUE", domain, uuid, uri
 
 
@@ -327,7 +338,7 @@ def seed ():
             [uri] = line.split("\t")
             uuid, uri = getUUID(uri)
 
-            if debug(0):
+            if debug(3):
                 print "UUID", uuid, uri
 
             testSet(uuid, uri)
@@ -371,7 +382,7 @@ def getUUID (uri):
 
     uri = uri.replace(" ", "+")
     m = hashlib.md5()
-    m.update(uri)
+    m.update(filter(lambda x: x in string.printable, uri))
     uuid = m.hexdigest()
 
     return uuid, uri
@@ -400,7 +411,7 @@ def resolveLinks (out_links):
     resolved_links = set([])
 
     for link_uri in out_links:
-        norm_uri = red_cli.hget(conf_param["norm_uri_key"], link_uri)
+        norm_uri = red_cli.hget(link_uri, "norm_uri")
 
         if norm_uri:
             resolved_links.add(norm_uri)
@@ -432,8 +443,8 @@ def drawQueue (local_queue, draw_limit):
             uri = red_cli.get(uuid)
             protocol, domain = getDomain(uri)
 
-            if debug(0):
-                print "UUID", domain, uuid, uri
+            if debug(3):
+                print "DOMAIN", domain, uuid, uri
 
             # enqueue URI fetch task in local queue
             local_queue.put([protocol, domain, uuid, uri])
@@ -467,7 +478,8 @@ def crawl ():
             print "ITER", iter, has_more
 
         if iter >= int(conf_param["max_iterations"]):
-            has_more = False
+            local_queue.join()
+            sys.exit(0)
         else:
             iter += 1
             time.sleep(int(conf_param["request_sleep"]))
