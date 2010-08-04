@@ -11,13 +11,14 @@
 ## @author Paco Nathan <ceteri@gmail.com>
 
 
-from BeautifulSoup import BeautifulSoup, SoupStrainer
+from BeautifulSoup import BeautifulSoup, BeautifulStoneSoup, Comment, SoupStrainer
 from datetime import datetime, timedelta
 import Queue
 import base64
 import hashlib
 import httplib
 import numpy
+import re
 import redis
 import robotparser
 import string
@@ -223,8 +224,6 @@ class ThreadUri (threading.Thread):
         # resolve redirects among the outbound links
 
         red_cli.hset(orig_url, "norm_uri", norm_uri)
-        out_links = resolveLinks(out_links)
-
         red_cli.hset(norm_uri, "out_links", "\t".join(out_links))
 
         # persist the other metadata + data
@@ -370,6 +369,9 @@ def whitelist ():
             sys.stderr.write("IndexError: %(err)s\n%(data)s\n" % {"err": str(err), "data": line})
 
 
+######################################################################
+## crawler methods
+
 def spawnThreads (local_queue, white_list, num_threads):
     ## spawn a pool of threads, passing them the local queue instance
 
@@ -489,8 +491,116 @@ def crawl ():
             time.sleep(int(conf_param["request_sleep"]))
 
 
-def textKeys ():
-    ## pull from the list of URIs which need text analytics
+######################################################################
+## mapper methods
+
+def extractText (content):
+    ## parse the text paragraphs out of HTML content
+
+    para_list = []
+
+    try:
+        soup = BeautifulSoup(content)
+
+        # nuke the HTML comments and JavaScript
+
+        comments = soup.findAll(text=lambda text:isinstance(text, Comment))
+        c = [comment.extract() for comment in comments] 
+
+        for script in soup.findAll('script'):
+            script.extract()
+
+        # get only the text from the <body/>
+
+        if soup.body:
+            stone = BeautifulStoneSoup(''.join(soup.body.fetchText(text=True)), convertEntities=BeautifulStoneSoup.ALL_ENTITIES)
+
+            if stone:
+                para_list = stone.contents
+
+    except UnicodeEncodeError:
+        pass
+    except TypeError:
+        pass
+
+    return para_list
+
+
+def parseTerms (para_list):
+    ## collect term counts and word bag, out of text paragraphs
+
+    term_count = {}
+    word_bag = set([])
+    blank_pat = re.compile("^[\-\_]+$")
+
+    for para in para_list:
+        for line in para.split("\n"):
+            try:
+                l = re.sub("[^a-z0-9\-\_]", " ", line.strip().lower()).split(" ")
+
+                for word in l:
+                    if not re.search(blank_pat, word) and (len(word) > 0):
+                        # term counts within a doc
+
+                        if word not in term_count:
+                            term_count[word] = 1
+                        else:
+                            term_count[word] += 1
+
+                        # "bag of word" (unique terms)
+                        word_bag.add(word)
+
+            except ValueError, err:
+                sys.stderr.write("ValueError: %(err)s\n%(data)s\n" % {"err": str(err), "data": str(l)})
+
+    return term_count, word_bag
+
+
+def getTermList (word_bag):
+    ## construct a list of unique words, sorted in alpha order
+
+    term_list = list(map(lambda x: x, word_bag))
+    term_list.sort()
+
+    return term_list
+
+
+def getTermFreq (term_count, term_list):
+    ## calculate term frequencies
+
+    sum_tf = float(sum(term_count.values()))
+    term_freq = {}
+
+    for i in range(0, len(term_list)):
+        word = term_list[i]
+        term_freq[word] = float(term_count[word]) / sum_tf
+
+    return term_freq
+
+
+def emitTerms (uuid, term_list, term_freq, stopwords):
+    ## emit co-occurring terms, with pairs in canonical order
+    ## (lower triangle of the cross-product)
+
+    for i in range(0, len(term_list)):
+        term = term_list[i]
+
+        if not term in stopwords:
+            print "\t".join([term, "f", "%.5f" % term_freq[term], uuid])
+
+            for j in range(0, len(term_list)):
+                if i != j:
+                    co_term = term_list[j]
+
+                    if not co_term in stopwords:
+                        print "\t".join([term, "c", co_term])
+
+
+def mapper ():
+    ## run MapReduce mapper on URIs which need text analytics
+
+    meta_keys = ["domain", "status", "date", "uuid", "content_type", "page_len", "crawl_time"]
+    stopwords = []
 
     while True:
         uri_list = red_cli.lrange(conf_param["needs_text_key"], 0, int(conf_param["map_chunk"]))
@@ -499,17 +609,27 @@ def textKeys ():
         if len_uri_list < 1:
             break
 
-        for uri in uri_list:
-            print "\t".join(red_cli.hmget(uri, ["domain", "status", "date", "uuid", "content_type", "page_len", "crawl_time"]) + [uri])
+        red_cli.ltrim(conf_param["needs_text_key"], len_uri_list + 1, -1)
 
-        uri_list = red_cli.ltrim(conf_param["needs_text_key"], len_uri_list + 1, -1)
+        for uri in uri_list:
+            domain, status, date, uuid, content_type, page_len, crawl_time = red_cli.hmget(uri, meta_keys)
+
+            print "\t".join([uri, "m", domain, status, date, uuid, content_type, page_len, crawl_time])
+
+            for out_link in resolveLinks(red_cli.hget(uri, "out_links").split("\t")):
+                print "\t".join([uri, "l", out_link])
+
+            term_count, word_bag = parseTerms(extractText(base64.b64decode(red_cli.hget(uri, "html"))))
+            term_list = getTermList(word_bag)
+            term_freq = getTermFreq(term_count, term_list)
+            emitTerms(uuid, term_list, term_freq, stopwords)
 
 
 if __name__ == "__main__":
     # verify command line usage
 
     if len(sys.argv) != 3:
-        print "Usage: slinky.py host:port:db [ 'config' | 'flush' | 'seed' | 'whitelist' | 'crawl' | 'textkeys' ] < input.txt"
+        print "Usage: slinky.py host:port:db [ 'config' | 'flush' | 'seed' | 'whitelist' | 'crawl' | 'mapper' ] < input.txt"
     else:
         # parse command line options
 
@@ -532,6 +652,6 @@ if __name__ == "__main__":
         elif mode == "crawl":
             # populate local queue and crawl those URIs
             crawl()
-        elif mode == "textkeys":
-            # pull from the list of URIs which need text analytics
-            textKeys()
+        elif mode == "mapper":
+            # run MapReduce mapper on URIs which need text analytics
+            mapper()

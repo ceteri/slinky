@@ -29,5 +29,5 @@ Usage:
 	# perform a crawl, per worker node
 	./src/slinky.py redis_host:port:db crawl
 
-	# pull the Hadoop mapper input for Text Analytics
-	./src/slinky.py redis_host:port:db textkeys
+	# run MapReduce mapper on URI list for Analytics
+	./src/slinky.py redis_host:port:db mapper
