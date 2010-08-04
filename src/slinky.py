@@ -216,7 +216,9 @@ class ThreadUri (threading.Thread):
         else:
             # mark as "visited"
             red_cli.setnx(norm_uuid, norm_uri)
-            red_cli.lpush(conf_param["needs_text_key"], norm_uri)
+
+            if status.startswith("2"):
+                red_cli.lpush(conf_param["needs_text_key"], norm_uri)
 
         # resolve redirects among the outbound links
 
@@ -456,6 +458,8 @@ def drawQueue (local_queue, draw_limit):
 def crawl ():
     ## draw URI fetch tasks from URI Queue, populate local queue, run tasks in parallel
 
+    print "START", start_time
+
     local_queue = Queue.Queue()
     white_list = red_cli.smembers(conf_param["white_list_key"])
 
@@ -485,14 +489,28 @@ def crawl ():
             time.sleep(int(conf_param["request_sleep"]))
 
 
+def textKeys ():
+    ## pull from the list of URIs which need text analytics
+
+    while True:
+        uri_list = red_cli.lrange(conf_param["needs_text_key"], 0, int(conf_param["map_chunk"]))
+        len_uri_list = len(uri_list)
+
+        if len_uri_list < 1:
+            break
+
+        for uri in uri_list:
+            print "\t".join(red_cli.hmget(uri, ["domain", "status", "date", "uuid", "content_type", "page_len", "crawl_time"]) + [uri])
+
+        uri_list = red_cli.ltrim(conf_param["needs_text_key"], len_uri_list + 1, -1)
+
+
 if __name__ == "__main__":
     # verify command line usage
 
     if len(sys.argv) != 3:
-        print "Usage: slinky.py host:port:db [ 'config' | 'flush' | 'seed' | 'whitelist' | 'crawl' ] < input.txt"
+        print "Usage: slinky.py host:port:db [ 'config' | 'flush' | 'seed' | 'whitelist' | 'crawl' | 'textkeys' ] < input.txt"
     else:
-        print "START", start_time
-
         # parse command line options
 
         red_cli = init(sys.argv[1])
@@ -514,3 +532,6 @@ if __name__ == "__main__":
         elif mode == "crawl":
             # populate local queue and crawl those URIs
             crawl()
+        elif mode == "textkeys":
+            # pull from the list of URIs which need text analytics
+            textKeys()

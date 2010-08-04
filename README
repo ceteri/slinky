@@ -20,8 +20,14 @@ Requires:
 	http://www.crummy.com/software/BeautifulSoup/
 
 Usage:
+	# initialize the URI Queue and Page Store
 	./src/slinky.py redis_host:port:db flush
 	./src/slinky.py redis_host:port:db config < config.tsv
 	./src/slinky.py redis_host:port:db seed < urls.tsv
 	./src/slinky.py redis_host:port:db whitelist < whitelist.tsv
+
+	# perform a crawl, per worker node
 	./src/slinky.py redis_host:port:db crawl
+
+	# pull the Hadoop mapper input for Text Analytics
+	./src/slinky.py redis_host:port:db textkeys
