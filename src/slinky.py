@@ -47,27 +47,81 @@ conf_param["debug_level"] = "0"
 ######################################################################
 ## class definitions
 
-class ThreadUri (threading.Thread):
-    """Threaded URI Fetcher"""
+class WebPage ():
+    """Web Page representation"""
 
-    def __init__ (self, local_queue, white_list):
-        ## initialize this Thread
+    def __init__ (self, protocol, domain, uuid, orig_url):
+        ## initialize this Page
 
-        threading.Thread.__init__(self)
-        self.local_queue = local_queue
-        self.white_list = white_list
+        self.protocol = protocol
+        self.domain = domain
+        self.uuid = uuid
+        self.orig_url = orig_url
+        self.norm_uuid = self.uuid
+        self.norm_uri = self.orig_url
+        self.crawl_time = 0
+        self.status = "403"
+        self.content_type = ""
+        self.date = ""
+        self.checksum = ""
+        self.b64_html = ""
+        self.raw_html = ""
 
 
-    def checkRobots (self, protocol, domain, uri):
+    def calcCrawlTime (self, crawl_start):
+        ## calculate the period required for fetching this Page
+
+        td = (datetime.now() - crawl_start)
+        self.crawl_time = (td.microseconds + (td.seconds + td.days * 24 * 3600) * 10**6) / 10**6
+
+
+    def getPage (self, url_handle):
+        ## get HTTP headers and HTML content from a URI handle
+
+        # keep track of the HTTP status and normalized URI
+        self.status = str(url_handle.getcode())
+        self.norm_uri = url_handle.geturl()
+        self.norm_uuid, self.norm_uri = getUUID(self.norm_uri)
+
+        # GET thresholded byte count of HTML content
+        self.raw_html = url_handle.read(int(conf_param["max_page_len"]))
+
+        # determine the content type
+
+        url_info = url_handle.info()
+        self.content_type = "text/html"
+
+        if "content-type" in url_info:
+            self.content_type = url_info["content-type"].split(";", 1)[0].strip()
+
+        # determine a date
+
+        self.date = ""
+
+        if "last-modified" in url_info:
+            self.date = url_info["last-modified"]
+        else:
+            self.date = url_info["date"]
+
+        # create an MD5 checksum and Base64 encoding of the content
+
+        m = hashlib.md5()
+        m.update(self.raw_html)
+
+        self.checksum = m.hexdigest()
+        self.b64_html = base64.b64encode(self.raw_html)
+
+
+    def checkRobots (self, uri):
         ## check "robots.txt" permission for this domain
 
-        if domain in domain_rules:
-            rp = domain_rules[domain]
+        if self.domain in domain_rules:
+            rp = domain_rules[self.domain]
         else:
             rp = robotparser.RobotFileParser()
-            rp.set_url("/".join([protocol, "", domain, "robots.txt"]))
+            rp.set_url("/".join([self.protocol, "", self.domain, "robots.txt"]))
             rp.read()
-            domain_rules[domain] = rp
+            domain_rules[self.domain] = rp
 
         is_allowed = rp.can_fetch(conf_param["user_agent"], uri)
 
@@ -77,93 +131,76 @@ class ThreadUri (threading.Thread):
         return is_allowed
 
 
-    def getPage (self, url_handle):
-        ## get HTTP headers and HTML content from a URI handle
-
-        # keep track of the HTTP status and normalized URI
-        status = str(url_handle.getcode())
-        norm_uri = url_handle.geturl()
-
-        # GET thresholded byte count of HTML content
-        raw_html = url_handle.read(int(conf_param["max_page_len"]))
-
-        # determine the content type
-
-        url_info = url_handle.info()
-        content_type = "text/html"
-
-        if "content-type" in url_info:
-            content_type = url_info["content-type"].split(";", 1)[0].strip()
-
-        # get a date
-        date = ""
-
-        if "last-modified" in url_info:
-            date = url_info["last-modified"]
-        else:
-            date = url_info["date"]
-
-        # create an MD5 checksum and Base64 encoding of the content
-
-        m = hashlib.md5()
-        m.update(raw_html)
-        checksum = m.hexdigest()
-        b64_html = base64.b64encode(raw_html)
-
-        return status, norm_uri, content_type, date, checksum, b64_html, raw_html
-
-
-    def fetch (self, protocol, domain, orig_url):
+    def fetch (self):
         ## attempt to fetch the given URI, collecting the status code
-
-        status = "403"
-        norm_uri = orig_url
-        content_type = ""
-        date = ""
-        checksum = ""
-        b64_html = ""
-        raw_html = ""
 
         try:
             # apply "robots.txt" restrictions, fetch if allowed
 
-            if self.checkRobots(protocol, domain, orig_url):
-                url_handle = urllib2.urlopen(orig_url, None, int(conf_param["http_timeout"]))
-                status, norm_uri, content_type, date, checksum, b64_html, raw_html  = self.getPage(url_handle)
+            if self.checkRobots(self.orig_url):
+                url_handle = urllib2.urlopen(self.orig_url, None, int(conf_param["http_timeout"]))
+                self.getPage(url_handle)
 
             # status codes based on HTTP/1.1 spec in RFC 2616:
             # http://www.w3.org/Protocols/rfc2616/rfc2616-sec10.html
 
         except httplib.InvalidURL, err:
-            sys.stderr.write("HTTP InvalidURL: %(err)s\n%(data)s\n" % {"err": str(err), "data": orig_url})
+            sys.stderr.write("HTTP InvalidURL: %(err)s\n%(data)s\n" % {"err": str(err), "data": self.orig_url})
             print str(err.code)
-            status = "400"
+            self.status = "400"
         except httplib.BadStatusLine, err:
-            sys.stderr.write("HTTP BadStatusLine: %(err)s\n%(data)s\n" % {"err": str(err), "data": orig_url})
-            status = "400"
+            sys.stderr.write("HTTP BadStatusLine: %(err)s\n%(data)s\n" % {"err": str(err), "data": self.orig_url})
+            self.status = "400"
         except httplib.IncompleteRead, err:
-            sys.stderr.write("HTTP IncompleteRead: %(err)s\n%(data)s\n" % {"err": str(err), "data": orig_url})
-            status = "400"
+            sys.stderr.write("HTTP IncompleteRead: %(err)s\n%(data)s\n" % {"err": str(err), "data": self.orig_url})
+            self.status = "400"
         except urllib2.HTTPError, err:
-            sys.stderr.write("HTTPError: %(err)s\n%(data)s\n" % {"err": str(err), "data": orig_url})
-            status = str(err.code)
+            sys.stderr.write("HTTPError: %(err)s\n%(data)s\n" % {"err": str(err), "data": self.orig_url})
+            self.status = str(err.code)
         except urllib2.URLError, err:
-            sys.stderr.write("URLError: %(err)s\n%(data)s\n" % {"err": str(err), "data": orig_url})
-            status = "400"
+            sys.stderr.write("URLError: %(err)s\n%(data)s\n" % {"err": str(err), "data": self.orig_url})
+            self.status = "400"
         except IOError, err:
-            sys.stderr.write("IOError: %(err)s\n%(data)s\n" % {"err": str(err), "data": orig_url})
-            status = "400"
+            sys.stderr.write("IOError: %(err)s\n%(data)s\n" % {"err": str(err), "data": self.orig_url})
+            self.status = "400"
         except ValueError, err:
             # unknown url type: http
-            sys.stderr.write("ValueError: %(err)s\n%(data)s\n" % {"err": str(err), "data": orig_url})
-            status = "400"
+            sys.stderr.write("ValueError: %(err)s\n%(data)s\n" % {"err": str(err), "data": self.orig_url})
+            self.status = "400"
         else:
             if debug(3):
-                print "SUCCESS:", orig_url
+                print "SUCCESS:", self.orig_url
 
         # TODO: capture explanation text for status code
 
-        return status, norm_uri, content_type, date, checksum, b64_html, raw_html
+        if debug(0):
+            print self.domain, self.norm_uri, self.status, self.content_type, self.date, str(len(self.raw_html)), self.checksum
+
+
+    def persist (self):
+        ## persist metadata + data for this Page
+
+        red_cli.hset(self.norm_uri, "uuid", self.norm_uuid)
+        red_cli.hset(self.norm_uri, "domain", self.domain)
+        red_cli.hset(self.norm_uri, "status", self.status)
+        red_cli.hset(self.norm_uri, "date", self.date)
+        red_cli.hset(self.norm_uri, "content_type", self.content_type)
+        red_cli.hset(self.norm_uri, "page_len", str(len(self.raw_html)))
+        red_cli.hset(self.norm_uri, "crawl_time", self.crawl_time)
+        red_cli.hset(self.norm_uri, "checksum", self.checksum)
+        red_cli.hset(self.norm_uri, "html", self.b64_html)
+        red_cli.hset(self.norm_uri, "out_links", "\t".join(self.out_links))
+
+
+class ThreadUri (threading.Thread):
+    """Threaded URI Fetcher"""
+
+    def __init__ (self, local_queue, white_list):
+        ## initialize this Thread
+
+        threading.Thread.__init__(self)
+        self.local_queue = local_queue
+        self.white_list = white_list
 
 
     def getOutLinks (self, protocol, domain, raw_html):
@@ -195,50 +232,35 @@ class ThreadUri (threading.Thread):
         # pop random/next from URI Queue and attempt to fetch HTML content
 
         [protocol, domain, uuid, orig_url] = self.local_queue.get()
+
+        page = WebPage(protocol, domain, uuid, orig_url)
         crawl_start = datetime.now()
 
-        status, norm_uri, content_type, date, checksum, b64_html, raw_html = self.fetch(protocol, domain, orig_url)
-        td = (datetime.now() - crawl_start)
-        crawl_time = (td.microseconds + (td.seconds + td.days * 24 * 3600) * 10**6) / 10**6
+        page.fetch()
+        page.calcCrawlTime(crawl_start)
 
-        norm_uuid, norm_uri = getUUID(norm_uri)
-        out_links = self.getOutLinks(protocol, domain, raw_html)
-
-        if debug(0):
-            print domain, norm_uri, status, content_type, date, str(len(raw_html)), checksum, crawl_time
+        page.out_links = self.getOutLinks(page.protocol, page.domain, page.raw_html)
 
         # update the Page Store with fetched/analyzed data
 
-        red_cli.srem(conf_param["pend_queue_key"], uuid)
+        red_cli.srem(conf_param["pend_queue_key"], page.uuid)
 
-        if status.startswith("3"):
+        if page.status.startswith("3"):
             # push HTTP-redirected link onto URI Queue
-            self.enqueueLink(norm_uuid, norm_uri)
+            self.enqueueLink(page.norm_uuid, page.norm_uri)
         else:
             # mark as "visited"
-            red_cli.setnx(norm_uuid, norm_uri)
+            red_cli.setnx(page.norm_uuid, page.norm_uri)
 
-            if status.startswith("2"):
-                red_cli.lpush(conf_param["needs_text_key"], norm_uri)
+            if page.status.startswith("2"):
+                red_cli.lpush(conf_param["needs_text_key"], page.norm_uri)
 
         # resolve redirects among the outbound links
 
-        red_cli.hset(orig_url, "norm_uri", norm_uri)
-        red_cli.hset(norm_uri, "out_links", "\t".join(out_links))
+        red_cli.hset(page.orig_url, "norm_uri", page.norm_uri)
+        page.persist()
 
-        # persist the other metadata + data
-
-        red_cli.hset(norm_uri, "uuid", norm_uuid)
-        red_cli.hset(norm_uri, "domain", domain)
-        red_cli.hset(norm_uri, "status", status)
-        red_cli.hset(norm_uri, "date", date)
-        red_cli.hset(norm_uri, "content_type", content_type)
-        red_cli.hset(norm_uri, "page_len", str(len(raw_html)))
-        red_cli.hset(norm_uri, "crawl_time", crawl_time)
-        red_cli.hset(norm_uri, "checksum", checksum)
-        red_cli.hset(norm_uri, "html", b64_html)
-
-        return out_links
+        return page.out_links
 
 
     def enqueueLink (self, uuid, uri):
