@@ -556,24 +556,27 @@ def parseTerms (para_list):
     blank_pat = re.compile("^[\-\_]+$")
 
     for para in para_list:
-        for line in para.split("\n"):
-            try:
-                l = re.sub("[^a-z0-9\-\_]", " ", line.strip().lower()).split(" ")
+        try:
+            for line in para.split("\n"):
+                try:
+                    l = re.sub("[^a-z0-9\-\_]", " ", line.strip().lower()).split(" ")
 
-                for word in l:
-                    if not re.search(blank_pat, word) and (len(word) > 0):
-                        # term counts within a doc
+                    for word in l:
+                        if not re.search(blank_pat, word) and (len(word) > 0):
+                            # term counts within a doc
 
-                        if word not in term_count:
-                            term_count[word] = 1
-                        else:
-                            term_count[word] += 1
+                            if word not in term_count:
+                                term_count[word] = 1
+                            else:
+                                term_count[word] += 1
 
-                        # "bag of word" (unique terms)
-                        word_bag.add(word)
+                            # "bag of word" (unique terms)
+                            word_bag.add(word)
 
-            except ValueError, err:
-                sys.stderr.write("ValueError: %(err)s\n%(data)s\n" % {"err": str(err), "data": str(l)})
+                except ValueError, err:
+                    sys.stderr.write("ValueError: %(err)s\n%(data)s\n" % {"err": str(err), "data": str(l)})
+        except TypeError:
+            pass
 
     return term_count, word_bag
 
@@ -618,33 +621,53 @@ def emitTerms (uuid, term_list, term_freq, stopwords):
                         print "\t".join([term, "c", co_term])
 
 
-def mapper ():
+def mapper (use_queue):
     ## run MapReduce mapper on URIs which need text analytics
+    ## TODO: refactor using "yield" to create an iterator instead of "use_queue"
 
     meta_keys = ["domain", "status", "date", "uuid", "content_type", "page_len", "crawl_time"]
     stopwords = []
 
-    while True:
-        uri_list = red_cli.lrange(conf_param["needs_text_key"], 0, int(conf_param["map_chunk"]))
-        len_uri_list = len(uri_list)
+    if use_queue:
+        # draw keys from the "needs_text_key" queue
 
-        if len_uri_list < 1:
-            break
+        while True:
+            uri_list = red_cli.lrange(conf_param["needs_text_key"], 0, int(conf_param["map_chunk"]))
+            len_uri_list = len(uri_list)
 
-        red_cli.ltrim(conf_param["needs_text_key"], len_uri_list + 1, -1)
+            if len_uri_list < 1:
+                break
 
-        for uri in uri_list:
-            domain, status, date, uuid, content_type, page_len, crawl_time = red_cli.hmget(uri, meta_keys)
+            red_cli.ltrim(conf_param["needs_text_key"], len_uri_list + 1, -1)
+            mapper_sub(uri_list, meta_keys, stopwords)
 
-            print "\t".join([uri, "m", domain, status, date, uuid, content_type, page_len, crawl_time])
+    else:
+        # draw keys from stdin (for testing only)
 
-            for out_link in resolveLinks(red_cli.hget(uri, "out_links").split("\t")):
-                print "\t".join([uri, "l", out_link])
+        uri_list = []
 
-            term_count, word_bag = parseTerms(extractText(base64.b64decode(red_cli.hget(uri, "html"))))
-            term_list = getTermList(word_bag)
-            term_freq = getTermFreq(term_count, term_list)
-            emitTerms(uuid, term_list, term_freq, stopwords)
+        for line in sys.stdin:
+            line = line.strip()
+            uri_list.append(line)
+
+        mapper_sub(uri_list, meta_keys, stopwords)
+
+
+def mapper_sub (uri_list, meta_keys, stopwords):
+    ## helper function
+
+    for uri in uri_list:
+        domain, status, date, uuid, content_type, page_len, crawl_time = red_cli.hmget(uri, meta_keys)
+
+        print "\t".join([uri, "m", domain, status, date, uuid, content_type, page_len, crawl_time])
+
+        for out_link in resolveLinks(red_cli.hget(uri, "out_links").split("\t")):
+            print "\t".join([uri, "l", out_link])
+
+        term_count, word_bag = parseTerms(extractText(base64.b64decode(red_cli.hget(uri, "html"))))
+        term_list = getTermList(word_bag)
+        term_freq = getTermFreq(term_count, term_list)
+        emitTerms(uuid, term_list, term_freq, stopwords)
 
 
 if __name__ == "__main__":
@@ -676,4 +699,4 @@ if __name__ == "__main__":
             crawl()
         elif mode == "mapper":
             # run MapReduce mapper on URIs which need text analytics
-            mapper()
+            mapper(False)
