@@ -17,7 +17,7 @@ import Queue
 import base64
 import hashlib
 import httplib
-import numpy
+import random
 import re
 import redis
 import robotparser
@@ -311,7 +311,7 @@ class ThreadUri (threading.Thread):
             # after "throttled" wait period, signal to queue that the task completed
             # TODO: adjust "throttle" based on aggregate server load (?? Yan, let's define)
 
-            time.sleep(int(conf_param["request_sleep"]) * (1.0 + numpy.random.random()))
+            time.sleep(int(conf_param["request_sleep"]) * (1.0 + random.random()))
             self.local_queue.task_done()
           
 
