@@ -61,6 +61,7 @@ class WebPage ():
         self.norm_uri = self.orig_url
         self.crawl_time = 0
         self.status = "403"
+        self.reason = "okay"
         self.content_type = ""
         self.date = ""
         self.checksum = ""
@@ -148,25 +149,32 @@ class WebPage ():
             sys.stderr.write("HTTP InvalidURL: %(err)s\n%(data)s\n" % {"err": str(err), "data": self.orig_url})
             print str(err.code)
             self.status = "400"
+            self.reason = "invalid URL"
         except httplib.BadStatusLine, err:
             sys.stderr.write("HTTP BadStatusLine: %(err)s\n%(data)s\n" % {"err": str(err), "data": self.orig_url})
             self.status = "400"
+            self.reason = "bad status line"
         except httplib.IncompleteRead, err:
             sys.stderr.write("HTTP IncompleteRead: %(err)s\n%(data)s\n" % {"err": str(err), "data": self.orig_url})
             self.status = "400"
+            self.reason = "imcomplete read"
         except urllib2.HTTPError, err:
             sys.stderr.write("HTTPError: %(err)s\n%(data)s\n" % {"err": str(err), "data": self.orig_url})
             self.status = str(err.code)
+            self.reason = "http error"
         except urllib2.URLError, err:
             sys.stderr.write("URLError: %(err)s\n%(data)s\n" % {"err": str(err), "data": self.orig_url})
             self.status = "400"
+            self.reason = err.reason
         except IOError, err:
             sys.stderr.write("IOError: %(err)s\n%(data)s\n" % {"err": str(err), "data": self.orig_url})
             self.status = "400"
+            self.reason = "IO error"
         except ValueError, err:
             # unknown url type: http
             sys.stderr.write("ValueError: %(err)s\n%(data)s\n" % {"err": str(err), "data": self.orig_url})
             self.status = "400"
+            self.reason = "value error"
         else:
             if debug(3):
                 print "SUCCESS:", self.orig_url
@@ -177,12 +185,23 @@ class WebPage ():
             print self.domain, self.norm_uri, self.status, self.content_type, self.date, str(len(self.raw_html)), self.checksum
 
 
+    def markVisited (self):
+        ## mark as "visited", not needing a crawl
+
+        red_cli.setnx(self.norm_uuid, self.norm_uri)
+        red_cli.sadd(conf_param["visited_set_key"], self.norm_uri)
+
+        if self.status.startswith("2"):
+            red_cli.lpush(conf_param["needs_text_key"], self.norm_uri)
+
+
     def persist (self):
         ## persist metadata + data for this Page
 
         red_cli.hset(self.norm_uri, "uuid", self.norm_uuid)
         red_cli.hset(self.norm_uri, "domain", self.domain)
         red_cli.hset(self.norm_uri, "status", self.status)
+        red_cli.hset(self.norm_uri, "reason", self.reason)
         red_cli.hset(self.norm_uri, "date", self.date)
         red_cli.hset(self.norm_uri, "content_type", self.content_type)
         red_cli.hset(self.norm_uri, "page_len", str(len(self.raw_html)))
@@ -249,11 +268,7 @@ class ThreadUri (threading.Thread):
             # push HTTP-redirected link onto URI Queue
             self.enqueueLink(page.norm_uuid, page.norm_uri)
         else:
-            # mark as "visited"
-            red_cli.setnx(page.norm_uuid, page.norm_uri)
-
-            if page.status.startswith("2"):
-                red_cli.lpush(conf_param["needs_text_key"], page.norm_uri)
+            page.markVisited()
 
         # resolve redirects among the outbound links
 
@@ -372,7 +387,7 @@ def seed ():
             sys.stderr.write("IndexError: %(err)s\n%(data)s\n" % {"err": str(err), "data": line})
 
 
-def whitelist ():
+def putWhitelist ():
     ## push white-listed domain rules into key/value store
 
     for line in sys.stdin:
@@ -384,6 +399,25 @@ def whitelist ():
                 print "WHITELISTED", domain
 
             red_cli.sadd(conf_param["white_list_key"], domain)
+
+        except ValueError, err:
+            sys.stderr.write("ValueError: %(err)s\n%(data)s\n" % {"err": str(err), "data": line})
+        except IndexError, err:
+            sys.stderr.write("IndexError: %(err)s\n%(data)s\n" % {"err": str(err), "data": line})
+
+
+def putStopwords ():
+    ## push stopwords list into key/value store
+
+    for line in sys.stdin:
+        try:
+            line = line.strip()
+            [word] = line.split("\t")
+
+            if debug(0):
+                print "STOPWORDS", word
+
+            red_cli.sadd(conf_param["stop_word_key"], word)
 
         except ValueError, err:
             sys.stderr.write("ValueError: %(err)s\n%(data)s\n" % {"err": str(err), "data": line})
@@ -625,8 +659,8 @@ def mapper (use_queue):
     ## run MapReduce mapper on URIs which need text analytics
     ## TODO: refactor using "yield" to create an iterator instead of "use_queue"
 
-    meta_keys = ["domain", "status", "date", "uuid", "content_type", "page_len", "crawl_time"]
-    stopwords = []
+    meta_keys = ["domain", "status", "date", "uuid", "content_type", "page_len", "crawl_time", "reason"]
+    stopwords = red_cli.smembers(conf_param["stop_word_key"])
 
     if use_queue:
         # draw keys from the "needs_text_key" queue
@@ -657,24 +691,26 @@ def mapper_sub (uri_list, meta_keys, stopwords):
     ## helper function
 
     for uri in uri_list:
-        domain, status, date, uuid, content_type, page_len, crawl_time = red_cli.hmget(uri, meta_keys)
+        meta = red_cli.hmget(uri, meta_keys)
+        domain, status, date, uuid, content_type, page_len, crawl_time, reason = meta
 
-        print "\t".join([uri, "m", domain, status, date, uuid, content_type, page_len, crawl_time])
+        if domain:
+            print "\t".join([uri, "m", domain, status, date, uuid, content_type, page_len, crawl_time, reason])
 
-        for out_link in resolveLinks(red_cli.hget(uri, "out_links").split("\t")):
-            print "\t".join([uri, "l", out_link])
+            for out_link in resolveLinks(red_cli.hget(uri, "out_links").split("\t")):
+                print "\t".join([uri, "l", out_link])
 
-        term_count, word_bag = parseTerms(extractText(base64.b64decode(red_cli.hget(uri, "html"))))
-        term_list = getTermList(word_bag)
-        term_freq = getTermFreq(term_count, term_list)
-        emitTerms(uuid, term_list, term_freq, stopwords)
+            term_count, word_bag = parseTerms(extractText(base64.b64decode(red_cli.hget(uri, "html"))))
+            term_list = getTermList(word_bag)
+            term_freq = getTermFreq(term_count, term_list)
+            emitTerms(uuid, term_list, term_freq, stopwords)
 
 
 if __name__ == "__main__":
     # verify command line usage
 
     if len(sys.argv) != 3:
-        print "Usage: slinky.py host:port:db [ 'config' | 'flush' | 'seed' | 'whitelist' | 'crawl' | 'mapper' ] < input.txt"
+        print "Usage: slinky.py host:port:db [ 'config' | 'flush' | 'seed' | 'whitelist' | 'crawl' | 'stopwords' | 'mapper' ] < input.txt"
     else:
         # parse command line options
 
@@ -693,10 +729,13 @@ if __name__ == "__main__":
             seed()
         elif mode == "whitelist":
             # push white-listed domain rules into key/value store
-            whitelist()
+            putWhitelist()
         elif mode == "crawl":
             # populate local queue and crawl those URIs
             crawl()
+        elif mode == "stopwords":
+            # push stopwords list into key/value store
+            putStopwords()
         elif mode == "mapper":
             # run MapReduce mapper on URIs which need text analytics
             mapper(False)

@@ -4,7 +4,9 @@ debug_level	4
 
 todo_queue_key	todo
 pend_queue_key	pend
+visited_set_key	visited
 white_list_key	white
+stop_word_key	stop
 needs_text_key	needs.text
 needs_link_key	needs.link
 
