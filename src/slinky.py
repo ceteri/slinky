@@ -227,19 +227,24 @@ class ThreadUri (threading.Thread):
 
         out_links = set([])
 
-        for link in BeautifulSoup(raw_html, parseOnlyThese=SoupStrainer("a")):
-            if link.has_key("href"):
-                l = link["href"]
+        try:
+            results = BeautifulSoup(raw_html, parseOnlyThese=SoupStrainer("a"))
 
-                if len(l) < 1 or l.startswith("javascript") or l.startswith("#"):
-                    # ignore non-links
-                    pass
-                elif l.startswith("/"):
-                    # reconstruct absolute URI from relative URI
-                    out_links.add("/".join([protocol, "", domain]) + l)
-                else:
-                    # add the absolute URI
-                    out_links.add(l)
+            for link in results:
+                if link.has_key("href"):
+                    l = link["href"]
+
+                    if len(l) < 1 or l.startswith("javascript") or l.startswith("#"):
+                        # ignore non-links
+                        pass
+                    elif l.startswith("/"):
+                        # reconstruct absolute URI from relative URI
+                        out_links.add("/".join([protocol, "", domain]) + l)
+                    else:
+                        # add the absolute URI
+                        out_links.add(l)
+        except UnicodeEncodeError, err:
+            sys.stderr.write("UnicodeEncodeError: %(err)s\n" % {"err": str(err)})
 
         if debug(4):
             print out_links
