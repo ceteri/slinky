@@ -44,6 +44,16 @@ CONF_PARAM_KEY = "conf"
 conf_param["debug_level"] = "0"
 
 
+redirect_handler = urllib2.HTTPRedirectHandler()
+
+class MyHTTPRedirectHandler (urllib2.HTTPRedirectHandler):
+    def http_error_302 (self, req, fp, code, msg, headers):
+        print "REDIRECT", code, req
+        return urllib2.HTTPRedirectHandler.http_error_302(self, req, fp, code, msg, headers)
+
+    http_error_301 = http_error_303 = http_error_307 = http_error_302
+
+
 ######################################################################
 ## class definitions
 
@@ -268,12 +278,12 @@ class ThreadUri (threading.Thread):
         # update the Page Store with fetched/analyzed data
 
         red_cli.srem(conf_param["pend_queue_key"], page.uuid)
+        page.markVisited()
+
+        # push HTTP-redirected link onto URI Queue
 
         if page.status.startswith("3"):
-            # push HTTP-redirected link onto URI Queue
             self.enqueueLink(page.norm_uuid, page.norm_uri)
-        else:
-            page.markVisited()
 
         # resolve redirects among the outbound links
 
@@ -528,7 +538,7 @@ def crawl ():
 
     spawnThreads(local_queue, white_list, int(conf_param["num_threads"]))
 
-    opener = urllib2.build_opener()
+    opener = urllib2.build_opener(MyHTTPRedirectHandler)
     opener.addheaders = [("User-agent", conf_param["user_agent"]), ("Accept-encoding", "gzip")]
 
     draw_limit = int(conf_param["num_threads"]) * int(conf_param["over_book"])
