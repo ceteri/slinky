@@ -562,6 +562,29 @@ def crawl ():
             time.sleep(int(conf_param["request_sleep"]))
 
 
+def visited ():
+    ## list the visited URIs
+
+    meta_keys = ["status", "uuid", "crawl_time", "page_len", "domain", "reason"]
+
+    for uri in red_cli.smembers(conf_param["visited_set_key"]):
+        meta = red_cli.hmget(uri, meta_keys)
+        uri = string.replace(uri, "\n", "_")
+
+        if debug(4):
+            print "META", meta
+
+        status, uuid, crawl_time, page_len, domain, reason = meta
+
+        if status and (len(status) in [3]):
+            try:
+                print "\t".join([status, uuid, crawl_time, page_len, domain, reason, uri])
+            except TypeError, err:
+                sys.stderr.write("TypeError: %(err)s\n%(data)s\n" % {"err": str(err), "data": meta})
+        else:
+            sys.stderr.write("META ERROR " + str(meta) + "\n")
+
+
 ######################################################################
 ## mapper methods
 
@@ -674,7 +697,7 @@ def mapper (use_queue):
     ## run MapReduce mapper on URIs which need text analytics
     ## TODO: refactor using "yield" to create an iterator instead of "use_queue"
 
-    meta_keys = ["domain", "status", "date", "uuid", "content_type", "page_len", "crawl_time", "reason"]
+    meta_keys = ["status", "uuid", "crawl_time", "page_len", "domain", "reason"]
     stopwords = red_cli.smembers(conf_param["stop_word_key"])
 
     if use_queue:
@@ -688,44 +711,52 @@ def mapper (use_queue):
                 break
 
             red_cli.ltrim(conf_param["needs_text_key"], len_uri_list + 1, -1)
-            mapper_sub(uri_list, meta_keys, stopwords)
+
+            for uri in uri_list:
+                meta = red_cli.hmget(uri, meta_keys) + [uri]
+                mapper_sub(meta, stopwords)
 
     else:
         # draw keys from stdin (for testing only)
 
-        uri_list = []
-
         for line in sys.stdin:
-            line = line.strip()
-            uri_list.append(line)
-
-        mapper_sub(uri_list, meta_keys, stopwords)
+            meta = line.strip().split("\t", 6)
+            mapper_sub(meta, stopwords)
 
 
-def mapper_sub (uri_list, meta_keys, stopwords):
+def mapper_sub (meta, stopwords):
     ## helper function
 
-    for uri in uri_list:
-        meta = red_cli.hmget(uri, meta_keys)
-        domain, status, date, uuid, content_type, page_len, crawl_time, reason = meta
+    status, uuid, crawl_time, page_len, domain, reason, uri = meta
 
-        if domain:
-            print "\t".join([uri, "m", domain, status, date, uuid, content_type, page_len, crawl_time, reason])
+    if status:
+        print "\t".join([uri, "m", status, uuid, crawl_time, page_len, domain, reason])
 
-            for out_link in resolveLinks(red_cli.hget(uri, "out_links").split("\t")):
+        out_links = red_cli.hget(uri, "out_links")
+
+        if out_links:
+            for out_link in resolveLinks(out_links.split("\t")):
                 print "\t".join([uri, "l", out_link])
 
-            term_count, word_bag = parseTerms(extractText(base64.b64decode(red_cli.hget(uri, "html"))))
-            term_list = getTermList(word_bag)
-            term_freq = getTermFreq(term_count, term_list)
-            emitTerms(uuid, term_list, term_freq, stopwords)
+        # TODO currently disabled
+        #mapper_text(uri, uuid, stopwords)
+
+
+def mapper_text (uri, uuid, stopwords):
+    ## mapper for text analytics
+
+    term_count, word_bag = parseTerms(extractText(base64.b64decode(red_cli.hget(uri, "html"))))
+    term_list = getTermList(word_bag)
+    term_freq = getTermFreq(term_count, term_list)
+
+    emitTerms(uuid, term_list, term_freq, stopwords)
 
 
 if __name__ == "__main__":
     # verify command line usage
 
     if len(sys.argv) != 3:
-        print "Usage: slinky.py host:port:db [ 'config' | 'flush' | 'seed' | 'whitelist' | 'crawl' | 'stopwords' | 'mapper' ] < input.txt"
+        print "Usage: slinky.py host:port:db [ 'config' | 'flush' | 'seed' | 'whitelist' | 'crawl' | 'visited' | 'stopwords' | 'mapper' ] < input.txt"
     else:
         # parse command line options
 
@@ -748,6 +779,9 @@ if __name__ == "__main__":
         elif mode == "crawl":
             # populate local queue and crawl those URIs
             crawl()
+        elif mode == "visited":
+            # list the visited URIs
+            visited()
         elif mode == "stopwords":
             # push stopwords list into key/value store
             putStopwords()
