@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/env python
 # encoding: utf-8
 
 ## Copyright (C) 2010, Paco Nathan. This work is licensed under
@@ -9,7 +9,6 @@
 ##    San Francisco, California, 94105, USA
 ##
 ## @author Paco Nathan <ceteri@gmail.com>
-
 
 import redis
 import sys

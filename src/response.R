@@ -1,4 +1,15 @@
-data <- read.csv("/Users/paco/Desktop/crawl/dist.tsv", sep=' ', header=F)
+## Copyright (C) 2010, Paco Nathan. This work is licensed under
+## the BSD License. To view a copy of this license, visit:
+##    http://creativecommons.org/licenses/BSD/
+## or send a letter to:
+##    Creative Commons, 171 Second Street, Suite 300
+##    San Francisco, California, 94105, USA
+##
+## @author Paco Nathan <ceteri@gmail.com>
+
+## create a graph for relative frequence vs. HTTP response time
+
+data <- read.csv("response.tsv", sep=' ', header=F)
 
 t <- data[,2]
 c <- data[,1]

@@ -1,10 +1,17 @@
 #!/usr/bin/env python
 # encoding: utf-8
 
+## Copyright (C) 2010, Paco Nathan. This work is licensed under
+## the BSD License. To view a copy of this license, visit:
+##    http://creativecommons.org/licenses/BSD/
+## or send a letter to:
+##    Creative Commons, 171 Second Street, Suite 300
+##    San Francisco, California, 94105, USA
+##
+## @author Paco Nathan <ceteri@gmail.com>
+
 ## reducer to calculate TF-IDF from "map_parse.py" output
 ## http://en.wikipedia.org/wiki/Tf–idf
-##
-## author: Paco Nathan <ceteri@gmail.com>
 
 import math
 import sys
