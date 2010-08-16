@@ -17,7 +17,7 @@ def main ():
 
         try:
             l = line.split("\t")
-            send, kind, recv, doc_id = l
+            send, kind, recv = l
 
             print ",".join([send, recv])
 
