@@ -47,7 +47,7 @@ redirect_handler = urllib2.HTTPRedirectHandler()
 
 class MyHTTPRedirectHandler (urllib2.HTTPRedirectHandler):
     def http_error_302 (self, req, fp, code, msg, headers):
-        print "REDIRECT", code, req
+        printLog("REDIRECT", [code, req])
         return urllib2.HTTPRedirectHandler.http_error_302(self, req, fp, code, msg, headers)
 
     http_error_301 = http_error_303 = http_error_307 = http_error_302
@@ -69,6 +69,7 @@ class WebPage ():
         self.norm_uuid = self.uuid
         self.norm_uri = self.orig_url
         self.crawl_time = 0
+        self.seed_hops = 0
         self.status = "403"
         self.reason = "okay"
         self.content_type = ""
@@ -136,7 +137,7 @@ class WebPage ():
         is_allowed = rp.can_fetch(conf_param["user_agent"], uri)
 
         if debug(3):
-            print "ROBOTS", is_allowed, uri
+            printLog("ROBOTS", [is_allowed, uri])
 
         return is_allowed
 
@@ -156,7 +157,6 @@ class WebPage ():
 
         except httplib.InvalidURL, err:
             sys.stderr.write("HTTP InvalidURL: %(err)s\n%(data)s\n" % {"err": str(err), "data": self.orig_url})
-            print str(err.code)
             self.status = "400"
             self.reason = "invalid URL"
         except httplib.BadStatusLine, err:
@@ -186,38 +186,38 @@ class WebPage ():
             self.reason = "value error"
         else:
             if debug(3):
-                print "SUCCESS:", self.orig_url
+                printLog("SUCCESS", [self.orig_url])
 
         # TODO: capture explanation text for status code
 
         if debug(0):
-            print self.domain, self.norm_uri, self.status, self.content_type, self.date, str(len(self.raw_html)), self.checksum
+            printLog("CRAWL", [self.domain, self.norm_uri, self.status, self.content_type, self.date, str(len(self.raw_html)), self.checksum])
 
 
     def markVisited (self):
         ## mark as "visited", not needing a crawl
 
         red_cli.setnx(self.norm_uuid, self.norm_uri)
-        red_cli.sadd(conf_param["visited_set_key"], self.norm_uri)
+        red_cli.sadd(conf_param["visited_set_key"], self.norm_uuid)
 
         if self.status.startswith("2"):
-            red_cli.lpush(conf_param["needs_text_key"], self.norm_uri)
+            red_cli.lpush(conf_param["needs_text_key"], self.norm_uuid)
 
 
     def persist (self):
         ## persist metadata + data for this Page
 
-        red_cli.hset(self.norm_uri, "uuid", self.norm_uuid)
-        red_cli.hset(self.norm_uri, "domain", self.domain)
-        red_cli.hset(self.norm_uri, "status", self.status)
-        red_cli.hset(self.norm_uri, "reason", self.reason)
-        red_cli.hset(self.norm_uri, "date", self.date)
-        red_cli.hset(self.norm_uri, "content_type", self.content_type)
-        red_cli.hset(self.norm_uri, "page_len", str(len(self.raw_html)))
-        red_cli.hset(self.norm_uri, "crawl_time", self.crawl_time)
-        red_cli.hset(self.norm_uri, "checksum", self.checksum)
-        red_cli.hset(self.norm_uri, "html", self.b64_html)
-        red_cli.hset(self.norm_uri, "out_links", "\t".join(self.out_links))
+        red_cli.hset(self.norm_uuid, "uri", self.norm_uri)
+        red_cli.hset(self.norm_uuid, "domain", self.domain)
+        red_cli.hset(self.norm_uuid, "status", self.status)
+        red_cli.hset(self.norm_uuid, "reason", self.reason)
+        red_cli.hset(self.norm_uuid, "date", self.date)
+        red_cli.hset(self.norm_uuid, "content_type", self.content_type)
+        red_cli.hset(self.norm_uuid, "page_len", str(len(self.raw_html)))
+        red_cli.hset(self.norm_uuid, "crawl_time", self.crawl_time)
+        red_cli.hset(self.norm_uuid, "checksum", self.checksum)
+        red_cli.hset(self.norm_uuid, "html", self.b64_html)
+        red_cli.hset(self.norm_uuid, "out_links", "\t".join(self.out_links))
 
 
 class ThreadUri (threading.Thread):
@@ -256,7 +256,7 @@ class ThreadUri (threading.Thread):
             sys.stderr.write("UnicodeEncodeError: %(err)s\n" % {"err": str(err)})
 
         if debug(4):
-            print out_links
+            printLog("OUT LINKS", out_links)
 
         return out_links
 
@@ -298,13 +298,13 @@ class ThreadUri (threading.Thread):
         protocol, domain = getDomain(uri)
 
         if debug(3):
-            print "CHECK", protocol, domain, uri
+            printLog("CHECK", [protocol, domain, uri])
 
         if len(self.white_list) < 1 or domain in self.white_list:
             testSet(uuid, uri)
 
             if debug(3):
-                print "ENQUEUE", domain, uuid, uri
+                printLog("ENQUEUE", [domain, uuid, uri])
 
 
     def run (self):
@@ -320,7 +320,7 @@ class ThreadUri (threading.Thread):
             if debug(0):
                 task_counter += 1
                 td = (datetime.now() - start_time)
-                print "TIME", task_counter, (td.microseconds + (td.seconds + td.days * 24 * 3600) * 10**6) / 10**6
+                printLog("TIME", [task_counter, (td.microseconds + (td.seconds + td.days * 24 * 3600) * 10**6) / 10**6])
 
             # after "throttled" wait period, signal to queue that the task completed
             # TODO: adjust "throttle" based on aggregate server load (?? Yan, let's define)
@@ -336,9 +336,11 @@ def init (host_port_db):
     ## set up the Redis client
 
     host, port, db = host_port_db.split(":")
-    red_cli = redis.Redis(host=host, port=int(port), db=int(db))
+    return redis.Redis(host=host, port=int(port), db=int(db))
 
-    return red_cli
+
+def printLog (kind, args):
+    sys.stderr.write(kind + ": " + " ".join(map(lambda x: str(x), args)) + "\n")
 
 
 def debug (level):
@@ -355,7 +357,7 @@ def config ():
             if len(line) > 0 and not line.startswith("#"):
                 [param, value] = line.split("\t")
 
-                print "CONFIG", param, value
+                printLog("CONFIG", [param, value])
                 red_cli.hset(CONF_PARAM_KEY, param, value);
 
         except ValueError, err:
@@ -374,11 +376,16 @@ def flush (all):
         red_cli.delete(conf_param["pend_queue_key"])
 
 
-def testSet (uuid, uri):
+def testSet (uuid, hops, uri):
     ## test whether URI has been visited before, then add to URI Queue
 
+    visited_before = True
+
     if red_cli.setnx(uuid, uri):
-        red_cli.sadd(conf_param["todo_queue_key"], uuid)
+        visited_before = False
+        red_cli.zadd(conf_param["todo_queue_key"], hops, uuid)
+
+    return visited_before
 
 
 def seed ():
@@ -391,7 +398,7 @@ def seed ():
             uuid, uri = getUUID(uri)
 
             if debug(3):
-                print "UUID", uuid, uri
+                printLog("UUID", [uuid, uri])
 
             testSet(uuid, uri)
 
@@ -410,7 +417,7 @@ def putWhitelist ():
             [domain] = line.split("\t")
 
             if debug(0):
-                print "WHITELISTED", domain
+                printLog("WHITELISTED", [domain])
 
             red_cli.sadd(conf_param["white_list_key"], domain)
 
@@ -429,7 +436,7 @@ def putStopwords ():
             [word] = line.split("\t")
 
             if debug(0):
-                print "STOPWORDS", word
+                printLog("STOPWORDS", [word])
 
             red_cli.sadd(conf_param["stop_word_key"], word)
 
@@ -506,8 +513,8 @@ def drawQueue (local_queue, draw_limit):
             pend_len = red_cli.scard(conf_param["pend_queue_key"])
 
             if debug(0):
-                print "DONE: URI Queue is now empty"
-                print "PEND", pend_len
+                printLog("DONE: URI Queue is now empty", [])
+                printLog("PEND", [pend_len])
 
             return pend_len > 0
 
@@ -518,7 +525,7 @@ def drawQueue (local_queue, draw_limit):
             protocol, domain = getDomain(uri)
 
             if debug(3):
-                print "DOMAIN", domain, uuid, uri
+                printLog("DOMAIN", [domain, uuid, uri])
 
             # enqueue URI fetch task in local queue
             local_queue.put([protocol, domain, uuid, uri])
@@ -530,14 +537,14 @@ def drawQueue (local_queue, draw_limit):
 def crawl ():
     ## draw URI fetch tasks from URI Queue, populate local queue, run tasks in parallel
 
-    print "START", start_time
+    printLog("START", [start_time])
 
     local_queue = Queue.Queue()
     white_list = red_cli.smembers(conf_param["white_list_key"])
 
     spawnThreads(local_queue, white_list, int(conf_param["num_threads"]))
 
-    opener = urllib2.build_opener(MyHTTPRedirectHandler)
+    opener = urllib2.build_opener()
     opener.addheaders = [("User-agent", conf_param["user_agent"]), ("Accept-encoding", "gzip")]
 
     draw_limit = int(conf_param["num_threads"]) * int(conf_param["over_book"])
@@ -551,7 +558,7 @@ def crawl ():
         has_more = drawQueue(local_queue, draw_limit)
 
         if debug(0):
-            print "ITER", iter, has_more
+            printLog("ITER", [iter, has_more])
 
         if iter >= int(conf_param["max_iterations"]):
             local_queue.join()
@@ -571,7 +578,7 @@ def visited ():
         uri = string.replace(uri, "\n", "_")
 
         if debug(4):
-            print "META", meta
+            printLog("META", [meta])
 
         status, uuid, crawl_time, page_len, domain, reason = meta
 
@@ -581,7 +588,7 @@ def visited ():
             except TypeError, err:
                 sys.stderr.write("TypeError: %(err)s\n%(data)s\n" % {"err": str(err), "data": meta})
         else:
-            sys.stderr.write("META ERROR " + str(meta) + "\n")
+            printLog("META ERROR ", meta)
 
 
 ######################################################################

@@ -19,6 +19,7 @@ Ant build script for Slinky
  <delete>
  <fileset dir=".">
    <include name="**/*~"/>
+   <include name="**/*.pyc"/>
  </fileset>
  </delete>
 </target>

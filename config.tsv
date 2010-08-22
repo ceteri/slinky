@@ -2,20 +2,17 @@ debug_level	4
 
 # Redis key layout
 
-todo_queue_key	todo
-pend_queue_key	pend
-visited_set_key	visited
 white_list_key	white
 stop_word_key	stop
-needs_text_key	needs.text
-needs_link_key	needs.link
+perform_todo_q	perform.todo
+perform_pend_q	perform.pend
+persist_todo_q	persist.todo
+persist_pend_q	persist.pend
 
 # multi-threading
 
 num_threads	2
-over_book	2
 request_sleep	2
-max_iterations	3
 
 # fetch settings
 
