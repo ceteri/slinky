@@ -8,6 +8,8 @@ perform_todo_q	perform.todo
 perform_pend_q	perform.pend
 persist_todo_q	persist.todo
 persist_pend_q	persist.pend
+analyze_todo_q	analyze.todo
+analyze_pend_q	analyze.pend
 
 # multi-threading
 

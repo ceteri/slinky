@@ -13,7 +13,7 @@
 from BeautifulSoup import BeautifulSoup, BeautifulStoneSoup, Comment, SoupStrainer
 from base64 import b64encode
 from collections import deque
-from datetime import datetime, timedelta
+from datetime import datetime
 from hashlib import md5
 from random import random
 from redis import Redis
@@ -27,13 +27,13 @@ import re
 import string
 import sys
 import urllib2
+import zlib
 
 
 ######################################################################
 ## global variables, debugging, dependency injection.. oh my!
 
 start_time = datetime.now()
-task_counter = 0
 
 red_cli = None
 red_lock = None
@@ -161,6 +161,38 @@ def crawl (crawler):
 
     wp.join()
     producer.join()
+
+
+def persist ():
+    ## drain content from PageStore and persist it on disk
+    ## NB: single-threaded
+
+    while True:
+        zpop = red_cli.zrange(conf_param["persist_todo_q"], 0, 0)
+
+        if len(zpop) < 1:
+            # PersistQueue is empty... so sleep now, then poll again later
+            sleep(1800)
+            continue
+        elif not red_cli.zrem(conf_param["persist_todo_q"], zpop[0]):
+            # some other Redis client won a race condition
+            continue
+        else:
+            # got it! move URI to the "persist pended" phased queue
+            uuid = zpop[0]
+
+            if uuid:
+                red_cli.zadd(conf_param["persist_pend_q"], uuid, getEpoch())
+                b64_html = red_cli.hget(uuid, "b64_html")
+
+                if b64_html:
+                    print "\t".join([uuid, b64_html])
+
+                pipe = red_cli.pipeline()
+                pipe.zadd(conf_param["analyze_todo_q"], uuid, getEpoch())
+                pipe.hdel(uuid, "b64_html")
+                pipe.zrem(conf_param["persist_pend_q"], uuid)
+                pipe.execute()
 
 
 ######################################################################
@@ -329,8 +361,8 @@ class WebPage ():
         # mark URI as "visited" and now needing to be persisted,
         # so move it to the "persist todo" phased queue
 
-        pipe.zadd(conf_param["persist_pend_q"], self.norm_uuid, getEpoch())
-        pipe.zrem(conf_param["perform_todo_q"], self.norm_uuid)
+        pipe.zadd(conf_param["persist_todo_q"], self.norm_uuid, getEpoch())
+        pipe.zrem(conf_param["perform_pend_q"], self.norm_uuid)
 
         pipe.execute()
 
@@ -414,28 +446,25 @@ class WebPage ():
 
 
     def calcCrawlTime (self, crawl_start):
-        ## calculate the period required for fetching this Page
+        ## calculate the period required for fetching this URI
 
         td = (datetime.now() - crawl_start)
         self.crawl_time = (td.microseconds + (td.seconds + td.days * 24 * 3600) * 10**6) / 10**6
 
 
     def formatRFC3339 (self, date):
+        ## convert date into RFC 3339 format
+
         dt = datetime.strptime(date, "%a, %d %b %Y %H:%M:%S %Z")
 
         return rfc3339(dt, utc=True, use_system_timezone=False)
 
 
     def deflate (self):
-        ## create an MD5 checksum and Base64 encoding of the content
+        ## compute CRC of the content, deflate with zlib then Base64 encode
 
-        m = md5()
-        m.update(self.raw_html)
-
-        # TODO: use zlib() and CRC instead
-
-        self.checksum = m.hexdigest()
-        self.b64_html = b64encode(self.raw_html)
+        self.checksum = zlib.crc32(self.raw_html)
+        self.b64_html = b64encode(zlib.compress(self.raw_html, 9))
 
 
 ######################################################################
@@ -757,7 +786,7 @@ if __name__ == "__main__":
     # verify command line usage
 
     if len(sys.argv) != 3:
-        print "Usage: slinky.py host:port:db [ 'config' | 'flush' | 'whitelist' | 'seed' | 'crawl' | 'drain' | 'stopwords' | 'mapper' ] < input.txt"
+        print "Usage: slinky.py host:port:db [ 'config' | 'flush' | 'whitelist' | 'seed' | 'crawl' | 'persist' | 'stopwords' | 'mapper' ] < input.txt"
     else:
         # most basic configuration
 
@@ -786,3 +815,6 @@ if __name__ == "__main__":
             # consume from CrawlQueue via WorkerPool producer
             c = Crawler()
             crawl(c)
+        elif mode == "persist":
+            # drain content from PageStore and persist it on disk
+            persist()
