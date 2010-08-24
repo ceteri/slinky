@@ -32,14 +32,17 @@ Requires:
 	http://www.sqlite.org/download.html
 
 Usage:
-	# initialize CrawlQueue and PageStore, from any node...
+	# initialize CrawlQueue and PageStore; run from any node...
 	./src/slinky.py redis_host:port:db flush
 	./src/slinky.py redis_host:port:db config < config.tsv
 	./src/slinky.py redis_host:port:db whitelist < whitelist.tsv
 	./src/slinky.py redis_host:port:db seed < urls.tsv
 
-	# perform a crawl, run this on each worker node...
+	# perform a crawl; run this on each worker node...
 	./src/slinky.py redis_host:port:db crawl
+
+	# persist the crawled content; run this on Redis server...
+	./src/slinky.py redis_host:port:db persist
 
 	# run MapReduce mapper on URI list for Analytics
 	./src/slinky.py redis_host:port:db mapper

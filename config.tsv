@@ -22,3 +22,7 @@ user_agent	Mozilla/5.0 (Macintosh; U; Intel Mac OS X 10.5; en-US; rv:1.9.0.10) G
 http_timeout	5
 max_page_len	500000
 map_chunk	1000
+
+# persistence layer
+
+persist_db_uri	/tmp/slinky.db

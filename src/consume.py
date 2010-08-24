@@ -24,6 +24,7 @@ from time import sleep
 
 import httplib
 import re
+import sqlite3
 import string
 import sys
 import urllib2
@@ -167,6 +168,12 @@ def persist ():
     ## drain content from PageStore and persist it on disk
     ## NB: single-threaded
 
+    # create SQL table to store deflated HTML content
+
+    db = PersistanceLayer()
+    db.connect(conf_param["persist_db_uri"])
+    db.sqlWrapper("CREATE TABLE page (uuid TEXT, b64_html TEXT)", silent=True)
+
     while True:
         zpop = red_cli.zrange(conf_param["persist_todo_q"], 0, 0)
 
@@ -187,12 +194,59 @@ def persist ():
 
                 if b64_html:
                     print "\t".join([uuid, b64_html])
+                    db.sqlWrapper("INSERT INTO page VALUES(?, ?)", (uuid, b64_html))
+                    db.commit()
 
                 pipe = red_cli.pipeline()
                 pipe.zadd(conf_param["analyze_todo_q"], uuid, getEpoch())
                 pipe.hdel(uuid, "b64_html")
                 pipe.zrem(conf_param["persist_pend_q"], uuid)
                 pipe.execute()
+
+
+######################################################################
+## PersistenceLayer class definition
+
+class PersistanceLayer ():
+    """Relational Persistance Layer"""
+
+    def __init__ (self):
+        ## initialize
+        self.uri = None
+        self.conn = None
+        self.curs = None
+
+
+    def connect (self, uri):
+        self.uri = uri
+        self.conn = sqlite3.connect(self.uri)
+        self.conn.isolation_level = None
+        self.curs = self.conn.cursor()
+
+
+    def sqlWrapper (self, query, args=(), silent=False):
+        ## wrapper to execute SQL statement
+        success = False
+
+        try:
+            self.curs.execute(query, args)
+            success = True
+        except sqlite3.Error, err:
+            if not silent:
+                sys.stderr.write("SQLite3 Error: %(err)s\n" % {"err": str(err.args[0])})
+
+        return success
+
+
+    def commit (self):
+        ## save changes / commit
+        self.conn.commit()
+
+
+    def close (self):
+        ## close the cursor when we are done with it
+        self.curs.close()
+        self.conn.close()
 
 
 ######################################################################
