@@ -34,6 +34,7 @@ import zlib
 ######################################################################
 ## global variables, debugging, dependency injection.. oh my!
 
+epoch_time = datetime.strptime("20010101", "%Y%m%d")
 start_time = datetime.now()
 
 red_cli = None
@@ -45,7 +46,7 @@ conf_param["debug_level"] = "0"
 
 
 ######################################################################
-## lifecycle methods
+## utility methods
 
 def init (host_port_db):
     ## set up the Redis client
@@ -56,19 +57,46 @@ def init (host_port_db):
 
 
 def printLog (kind, args):
-    sys.stderr.write(kind + ": " + " ".join(map(lambda x: str(x), args)) + "\n")
+    ## print a log trace out to stderr, after handling potential UTF8 issues
+
+    l = []
+
+    for a in args:
+        try:
+            l.append(str(a))
+        except UnicodeEncodeError:
+            pass
+
+    sys.stderr.write(kind + ": " + " ".join(l) + "\n")
 
 
 def debug (level):
-    return int(conf_param["debug_level"]) > level
+    ## check the log level
+
+    if "debug_level" not in conf_param:
+        return True
+    elif int(conf_param["debug_level"]) >= level:
+        return True
+    else:
+        return False
+
+
+def calcPeriod (start):
+    ## calculate a time period (millisec)
+
+    td = (datetime.now() - start)
+
+    return (td.microseconds + (td.seconds + td.days * 24 * 3600) * 10**6) / 10**3
 
 
 def getEpoch ():
-    td = (datetime.now() - datetime.strptime("19700101", "%Y%m%d"))
-    ts = (td.microseconds + (td.seconds + td.days * 24 * 3600) * 10**6) / 10**6
+    ## calculate the epoch (seconds) since 2001-01-01T00:00:00.000Z
 
-    return ts
+    return calcPeriod(epoch_time) / 10**3
 
+
+######################################################################
+## lifecycle methods
 
 def config ():
     ## put config params in key/value store, as a distrib cache
@@ -80,7 +108,9 @@ def config ():
             if len(line) > 0 and not line.startswith("#"):
                 [param, value] = line.split("\t")
 
-                printLog("CONFIG", [param, value])
+                if debug(0):
+                    printLog("CONFIG", [param, value])
+
                 red_cli.hset(CONF_PARAM_KEY, param, value);
 
         except ValueError, err:
@@ -127,9 +157,9 @@ def seed (crawler):
             [hops, uri] = line.split("\t", 1)
 
             page = WebPage(uri, int(hops))
-            page.uuid, page.uri, page.protocol, page.domain = page.getUUID(page.uri)
+            page.hydrate()
 
-            if debug(3):
+            if debug(0):
                 printLog("SEED", [page.uuid, page.uri, page.protocol, page.domain, page.hops])
 
 	    crawler.scheduleURI(page)
@@ -143,7 +173,9 @@ def seed (crawler):
 def crawl (crawler):
     ## draw fetch tasks from CrawlQueue, populate tasks into WorkerPool, run tasks in parallel
 
-    printLog("START", [start_time])
+    if debug(0):
+        printLog("START", [start_time])
+
     white_list = red_cli.smembers(conf_param["white_list_key"])
 
     opener = urllib2.build_opener()
@@ -277,6 +309,10 @@ class WebPage ():
         self.checksum = None
 
 
+    def hydrate (self):
+        self.uuid, self.uri, self.protocol, self.domain = self.getUUID(self.uri)
+
+
     def getUUID (self, uri):
         ## clean URI so it can be used as a unique key, then make an MD5 has as a UUID
 
@@ -327,40 +363,40 @@ class WebPage ():
         ## scan for outbound web links in the fetched HTML content
 
         out_links = set([])
+        results = []
 
         try:
             # TODO: include <img/> "src" links as well
             # TODO: any others?
 
             results = BeautifulSoup(self.raw_html, parseOnlyThese=SoupStrainer("a"))
-
-            for link in results:
-                if link.has_key("href"):
-                    l = link["href"]
-                    out_uri = None
-
-                    if len(l) < 1 or l.startswith("javascript") or l.startswith("#"):
-                        # ignore non-links
-                        continue
-                    elif l.startswith("/"):
-                        # reconstruct absolute URI from relative URI
-                        out_uri = "/".join([self.protocol, "", self.domain]) + l
-                    elif not l.startswith(self.protocol):
-                        # reconstruct absolute URI from local URI
-                        path_list, local_page, query_text = self.getPathQuery(self.norm_uri)
-                        out_uri = "/".join([self.protocol + ":", "", self.domain] + path_list + [""]) + l
-                    else:
-                        # add the absolute URI
-                        out_uri = l
-
-                    if out_uri:
-                        out_links.add(out_uri)
-
-                        if debug(0):
-                            printLog("OUT", [self.uuid, out_uri])
-
         except UnicodeEncodeError, err:
-            sys.stderr.write("UnicodeEncodeError: %(err)s\n" % {"err": str(err)})
+            sys.stderr.write("UnicodeEncodeError: %(err)s uuid: %(uuid)s\n" % {"err": str(err), "uuid": self.uuid})
+
+        for link in results:
+            if link.has_key("href"):
+                l = link["href"]
+                out_uri = None
+
+                if len(l) < 1 or l.startswith("javascript") or l.startswith("#"):
+                    # ignore non-links
+                    continue
+                elif l.startswith("/"):
+                    # reconstruct absolute URI from relative URI
+                    out_uri = "/".join([self.protocol + ":", "", self.domain]) + l
+                elif not l.startswith(self.protocol):
+                    # reconstruct absolute URI from local URI
+                    path_list, local_page, query_text = self.getPathQuery(self.norm_uri)
+                    out_uri = "/".join([self.protocol + ":", "", self.domain] + path_list + [""]) + l
+                else:
+                    # add the absolute URI
+                    out_uri = l
+
+                if out_uri:
+                    out_links.add(out_uri)
+
+                    if debug(5):
+                        printLog("OUT", [self.uuid, out_uri])
 
         return out_links
 
@@ -370,7 +406,10 @@ class WebPage ():
 
         crawl_start = datetime.now()
         self.fetch()
-        self.calcCrawlTime(crawl_start)
+        self.crawl_time = calcPeriod(crawl_start)
+
+        if debug(2):
+            printLog("attemptFetch", [self.uuid, self.norm_uri])
 
         # collect Redis commands in a MULTI/EXEC pipeline() batch
 
@@ -378,28 +417,42 @@ class WebPage ():
 
         # update derived metdata for the normalized URI
 
-        self.norm_uuid, self.norm_uri, self.protocol, self.domain = self.getUUID(self.norm_uri)
+        if self.norm_uri:
+            self.norm_uuid, self.norm_uri, self.protocol, self.domain = self.getUUID(self.norm_uri)
 
-        pipe.hset(self.uuid, "uri", self.norm_uri)
-        pipe.hset(self.norm_uuid, "uri", self.norm_uri)
+            pipe.hset(self.uuid, "uri", self.norm_uri)
+            pipe.hset(self.norm_uuid, "uri", self.norm_uri)
 
-        if self.uuid != self.norm_uuid:
-            pipe.hset(self.uuid, "norm_uuid", self.norm_uuid)
+            if self.uuid != self.norm_uuid:
+                pipe.hset(self.uuid, "norm_uuid", self.norm_uuid)
 
         # update metadata for URI in Page Store
 
-        pipe.hset(self.norm_uuid, "hops", self.hops)
-        pipe.hset(self.norm_uuid, "domain", self.domain)
-        pipe.hset(self.norm_uuid, "status", self.status)
-        pipe.hset(self.norm_uuid, "reason", self.reason)
-        pipe.hset(self.norm_uuid, "date", self.date)
-        pipe.hset(self.norm_uuid, "crawl_time", self.crawl_time)
-        pipe.hset(self.norm_uuid, "content_type", self.content_type)
+        if self.hops:
+            pipe.hset(self.norm_uuid, "hops", self.hops)
+
+        if self.domain:
+            pipe.hset(self.norm_uuid, "domain", self.domain)
+
+        if self.status:
+            pipe.hset(self.norm_uuid, "status", self.status)
+
+        if self.reason:
+            pipe.hset(self.norm_uuid, "reason", self.reason)
+
+        if self.content_type:
+            pipe.hset(self.norm_uuid, "content_type", self.content_type)
+
+        if self.date:
+            pipe.hset(self.norm_uuid, "date", self.date)
+
+        if self.crawl_time:
+            pipe.hset(self.norm_uuid, "crawl_time", self.crawl_time)
 
         # update content for URI in Page Store
 
         if self.raw_html:
-            if debug(4):
+            if debug(6):
                 printLog("HTML", [self.raw_html])
 
             self.deflate()
@@ -410,14 +463,17 @@ class WebPage ():
             # parse outbound links within URI content
 
             self.out_links = map(self.getUUID, self.parseOutLinks())
-            pipe.hset(self.norm_uuid, "out_links", map(lambda l: l[0], self.out_links))
+
+            if self.out_links:
+                pipe.hset(self.norm_uuid, "out_links", map(lambda l: l[0], self.out_links))
 
         # mark URI as "visited" and now needing to be persisted,
         # so move it to the "persist todo" phased queue
 
-        pipe.zadd(conf_param["persist_todo_q"], self.norm_uuid, getEpoch())
-        pipe.zrem(conf_param["perform_pend_q"], self.norm_uuid)
+        if self.norm_uuid:
+            pipe.zadd(conf_param["persist_todo_q"], self.norm_uuid, getEpoch())
 
+        pipe.zrem(conf_param["perform_pend_q"], self.uuid)
         pipe.execute()
 
         return map(lambda l: l[1], self.out_links), self.hops + 1
@@ -453,7 +509,7 @@ class WebPage ():
             self.reason = "http error"
         except urllib2.URLError, err:
             sys.stderr.write("URLError: %(err)s\n%(data)s\n" % {"err": str(err), "data": self.uri})
-            self.status = "400"
+            self.status = "408"
             self.reason = err.reason
         except IOError, err:
             sys.stderr.write("IOError: %(err)s\n%(data)s\n" % {"err": str(err), "data": self.uri})
@@ -467,8 +523,8 @@ class WebPage ():
         else:
             self.reason = "okay"
 
-        if debug(0):
-            printLog("CRAWL", [self.domain, self.norm_uri, self.date, self.content_type, self.status, self.reason])
+        if debug(1):
+            printLog("CRAWL", [self.hops, self.uuid, self.domain, self.norm_uri, self.date, self.content_type, self.status, self.reason])
 
 
     def getPage (self, url_handle):
@@ -497,13 +553,6 @@ class WebPage ():
             self.date = self.formatRFC3339(url_info["last-modified"])
         else:
             self.date = self.formatRFC3339(url_info["date"])
-
-
-    def calcCrawlTime (self, crawl_start):
-        ## calculate the period required for fetching this URI
-
-        td = (datetime.now() - crawl_start)
-        self.crawl_time = (td.microseconds + (td.seconds + td.days * 24 * 3600) * 10**6) / 10**6
 
 
     def formatRFC3339 (self, date):
@@ -559,7 +608,7 @@ class Crawler ():
 	except IOError, err:
             sys.stderr.write("IOError: %(err)s\n%(data)s\n" % {"err": str(err), "data": str([page.domain, page.uri])})
 
-        if debug(3):
+        if debug(4):
             printLog("ROBOTS", [is_allowed, page.uri])
 
         return is_allowed
@@ -572,15 +621,13 @@ class Crawler ():
         page.status = "0"
 	page.reason = "todo"
 
-        # TODO: iterate to chase down best UUID, in case of URL redirection
-
         # test/set UUID in the "uuid->best_uri" map
 
         if not red_cli.hget(page.uuid, "uri"):
             red_cli.hset(page.uuid, "uri", page.uri)
 
-            if debug(3):
-                printLog("CHECK", [page.protocol, page.domain, page.uri])
+            if debug(1):
+                printLog("QUEUE", [page.hops, page.uuid, page.domain, page.uri])
 
             # check URI against the domain whitelist rules
             if not self.passWhitelist(page):
@@ -647,8 +694,8 @@ class Crawler ():
             uuid = self.consumeQueue()
             task = uuid
 
-        if debug(0):
-            printLog("feedWorkerPool", ["%s FEED %d" % (worker_name, counter)])
+        if debug(1):
+            printLog("FEED", ["%s TASK# %d, %d sec" % (worker_name, counter, calcPeriod(start_time) / 10**3)])
 
         return task
 
@@ -663,6 +710,10 @@ class Crawler ():
 
         if uri and hops:
             page = WebPage(uri, int(hops))
+            page.hydrate()
+
+            if debug(3):
+                printLog("findPage", [page.uuid, page.domain, page.hops, page.uri])
 
         return page
 
@@ -670,7 +721,7 @@ class Crawler ():
     def runWorkerTask (self, worker_name, task):
         ## fetch+parser thread consumes a unit of work from WorkerPool
 
-        if debug(0):
+        if debug(2):
             printLog("runWorkerTask", ["%s TASK %s" % (worker_name, task)])
 
         uuid = task
@@ -681,15 +732,15 @@ class Crawler ():
         if page:
             out_links, hops = page.attemptFetch()
 
-            if debug(0):
-                printLog("TIME", [page.crawl_time, hops, out_links])
+            if debug(1):
+                printLog("TIME", [page.crawl_time, uuid])
 
             for out_uri in out_links:
                 p_out = WebPage(out_uri, hops)
-                p_out.uuid, p_out.uri, p_out.protocol, p_out.domain = p_out.getUUID(p_out.uri)
+                p_out.hydrate()
 
-                if debug(0):
-                    printLog("SCHED", [hops, out_uri, p_out.uuid])
+                if debug(4):
+                    printLog("SCHED", [p_out.hops, p_out.uuid, p_out.uri])
 
                 self.scheduleURI(p_out)
 
@@ -709,14 +760,14 @@ class BoundedQueue ():
         self.mon.acquire()
 
         while len(self.queue) >= self.limit:
-            if debug(4):
+            if debug(6):
                 printLog("put", ["queue full", task])
 
             self.wc.wait()
 
         self.queue.append(task)
 
-        if debug(4):
+        if debug(6):
             printLog("put", ["appended", task, "length now", len(self.queue)])
 
         self.rc.notify()
@@ -727,14 +778,14 @@ class BoundedQueue ():
         self.mon.acquire()
 
         while not self.queue:
-            if debug(4):
+            if debug(6):
                 printLog("get", ["queue empty"])
 
             self.rc.wait()
 
         task = self.queue.popleft()
 
-        if debug(4):
+        if debug(6):
             printLog("get", ["got", task, "remaining", len(self.queue)])
 
         self.wc.notify()

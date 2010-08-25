@@ -1,10 +1,12 @@
 #!/bin/bash -x
 
-host=172.16.100.63
+#host=172.16.100.63
+host=localhost
 
-./src/slinky.py $host:6379:1 flush
-./src/slinky.py $host:6379:1 config < imvu_config.tsv 
-./src/slinky.py $host:6379:1 whitelist < imvu_white.tsv 
-./src/slinky.py $host:6379:1 stopwords < stopwords
-./src/slinky.py $host:6379:1 seed < imvu_seed.tsv 
-./src/slinky.py $host:6379:1 crawl
+./src/consume.py $host:6379:0 flush
+./src/consume.py $host:6379:0 config < imvu_config.tsv 
+./src/consume.py $host:6379:0 whitelist < imvu_white.tsv 
+./src/consume.py $host:6379:0 seed < imvu_seed.tsv 
+./src/consume.py $host:6379:0 crawl
+
+#./src/consume.py $host:6379:0 stopwords < stopwords
