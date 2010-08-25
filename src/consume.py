@@ -211,7 +211,7 @@ def persist ():
 
         if len(zpop) < 1:
             # PersistQueue is empty... so sleep now, then poll again later
-            sleep(1800)
+            sleep(float(conf_param["persist_sleep"]))
             continue
         elif not red_cli.zrem(conf_param["persist_todo_q"], zpop[0]):
             # some other Redis client won a race condition
@@ -492,32 +492,32 @@ class WebPage ():
             # TODO: capture explanation text for status code
 
         except httplib.InvalidURL, err:
-            sys.stderr.write("HTTP InvalidURL: %(err)s\n%(data)s\n" % {"err": str(err), "data": self.uri})
+            sys.stderr.write("HTTP InvalidURL: %(err)s\n%(data)s\n" % {"err": str(err), "data": str([self.uuid, self.uri])})
             self.status = "400"
             self.reason = "invalid URL"
         except httplib.BadStatusLine, err:
-            sys.stderr.write("HTTP BadStatusLine: %(err)s\n%(data)s\n" % {"err": str(err), "data": self.uri})
+            sys.stderr.write("HTTP BadStatusLine: %(err)s\n%(data)s\n" % {"err": str(err), "data": str([self.uuid, self.uri])})
             self.status = "400"
             self.reason = "bad status line"
         except httplib.IncompleteRead, err:
-            sys.stderr.write("HTTP IncompleteRead: %(err)s\n%(data)s\n" % {"err": str(err), "data": self.uri})
+            sys.stderr.write("HTTP IncompleteRead: %(err)s\n%(data)s\n" % {"err": str(err), "data": str([self.uuid, self.uri])})
             self.status = "400"
             self.reason = "imcomplete read"
         except urllib2.HTTPError, err:
-            sys.stderr.write("HTTPError: %(err)s\n%(data)s\n" % {"err": str(err), "data": self.uri})
+            sys.stderr.write("HTTPError: %(err)s\n%(data)s\n" % {"err": str(err), "data": str([self.uuid, self.uri])})
             self.status = str(err.code)
             self.reason = "http error"
         except urllib2.URLError, err:
-            sys.stderr.write("URLError: %(err)s\n%(data)s\n" % {"err": str(err), "data": self.uri})
+            sys.stderr.write("URLError: %(err)s\n%(data)s\n" % {"err": str(err), "data": str([self.uuid, self.uri])})
             self.status = "408"
             self.reason = err.reason
         except IOError, err:
-            sys.stderr.write("IOError: %(err)s\n%(data)s\n" % {"err": str(err), "data": self.uri})
+            sys.stderr.write("IOError: %(err)s\n%(data)s\n" % {"err": str(err), "data": str([self.uuid, self.uri])})
             self.status = "400"
             self.reason = "IO error"
         except ValueError, err:
             # unknown url type: http
-            sys.stderr.write("ValueError: %(err)s\n%(data)s\n" % {"err": str(err), "data": self.uri})
+            sys.stderr.write("ValueError: %(err)s\n%(data)s\n" % {"err": str(err), "data": str([self.uuid, self.uri])})
             self.status = "400"
             self.reason = "value error"
         else:
@@ -690,7 +690,7 @@ class Crawler ():
         task = None
 
         while task is None:
-            sleep(int(conf_param["request_sleep"]))
+            sleep(float(conf_param["perform_sleep"]))
             uuid = self.consumeQueue()
             task = uuid
 
@@ -726,8 +726,7 @@ class Crawler ():
 
         uuid = task
         page = self.findPage(uuid)
-
-        sleep(int(conf_param["request_sleep"]))
+        sleep(0.01)
 
         if page:
             out_links, hops = page.attemptFetch()

@@ -14,14 +14,14 @@ analyze_pend_q	analyze.pend
 # multi-threading
 
 num_threads	2
-request_sleep	2
+perform_sleep	0.1
+persist_sleep	1800
 
 # fetch settings
 
 user_agent	Mozilla/5.0 (Macintosh; U; Intel Mac OS X 10.5; en-US; rv:1.9.0.10) Gecko/2009042315 Firefox/3.0.10
-http_timeout	5
-max_page_len	500000
-map_chunk	1000
+http_timeout	20
+max_page_len	1000000
 
 # persistence layer
 
