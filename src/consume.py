@@ -170,16 +170,11 @@ def seed (crawler):
             sys.stderr.write("IndexError: %(err)s\n%(data)s\n" % {"err": str(err), "data": line})
 
 
-def crawl (crawler):
+def perform (crawler):
     ## draw fetch tasks from CrawlQueue, populate tasks into WorkerPool, run tasks in parallel
 
     if debug(0):
         printLog("START", [start_time])
-
-    white_list = red_cli.smembers(conf_param["white_list_key"])
-
-    opener = urllib2.build_opener()
-    opener.addheaders = [("User-agent", conf_param["user_agent"]), ("Accept-encoding", "gzip")]
 
     wp = WorkerPool(queue_len = 1, num_cons = int(conf_param["num_threads"]))
     wp.run(crawler.runWorkerTask)
@@ -582,6 +577,9 @@ class Crawler ():
 	self.domain_rules = {}
         self.white_list = red_cli.smembers(conf_param["white_list_key"])
 
+        self.opener = urllib2.build_opener()
+        self.opener.addheaders = [("User-agent", conf_param["user_agent"]), ("Accept-encoding", "gzip")]
+
 
     def passWhitelist (self, page):
         ## is the URI domain whitelisted?
@@ -890,7 +888,7 @@ if __name__ == "__main__":
     # verify command line usage
 
     if len(sys.argv) != 3:
-        print "Usage: slinky.py host:port:db [ 'config' | 'flush' | 'whitelist' | 'seed' | 'crawl' | 'persist' | 'stopwords' | 'mapper' ] < input.txt"
+        print "Usage: slinky.py host:port:db [ 'config' | 'flush' | 'whitelist' | 'seed' | 'perform' | 'persist' | 'analyze' ] < input.txt"
     else:
         # most basic configuration
 
@@ -915,10 +913,10 @@ if __name__ == "__main__":
             # seed the CrawlQueue with root URIs as starting points
             c = Crawler()
             seed(c)
-        elif mode == "crawl":
+        elif mode == "perform":
             # consume from CrawlQueue via WorkerPool producer
             c = Crawler()
-            crawl(c)
+            perform(c)
         elif mode == "persist":
             # drain content from PageStore and persist it on disk
             persist()

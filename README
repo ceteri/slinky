@@ -39,7 +39,7 @@ Usage:
 	./src/slinky.py redis_host:port:db seed < urls.tsv
 
 	# perform a crawl; run this on each worker node...
-	./src/slinky.py redis_host:port:db crawl
+	./src/slinky.py redis_host:port:db perform
 
 	# persist the crawled content; run this on Redis server...
 	./src/slinky.py redis_host:port:db persist
