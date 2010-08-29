@@ -46,7 +46,7 @@ CONF_PARAM_KEY = "conf"
 conf_param = {}
 conf_param["debug_level"] = "0"
 
-in_process_loop = False
+in_process_loop = True
 
 
 ######################################################################
@@ -132,10 +132,10 @@ def config ():
             sys.stderr.write("IndexError: %(err)s\n%(data)s\n" % {"err": str(err), "data": line})
 
 
-def flush (all):
+def flush (clear_all):
     ## flush either all of the key/value store, or just the CrawlQueue
 
-    if all:
+    if clear_all:
         red_cli.flushdb()
     else:
         red_cli.delete(conf_param["perform_todo_q"])
@@ -147,6 +147,8 @@ def perform (app):
 
     if debug(0):
         printLog("START", [start_time])
+
+    signal.signal(signal.SIGINT, sigIntHandler)
 
     wp = WorkerPool(queue_len = 1, num_cons = int(conf_param["num_threads"]))
     wp.run(app.runWorkerTask)
@@ -170,8 +172,6 @@ def persist (app):
     app.initPersist()
 
     global in_process_loop
-
-    in_process_loop = True
     signal.signal(signal.SIGINT, sigIntHandler)
 
     while in_process_loop:
@@ -201,8 +201,6 @@ def analyze (app):
     app.initAnalyze()
 
     global in_process_loop
-
-    in_process_loop = True
     signal.signal(signal.SIGINT, sigIntHandler)
 
     while in_process_loop:
@@ -460,7 +458,7 @@ class WebPage ():
         # so move it to the "persist todo" phased queue
 
         if self.norm_uuid:
-            pipe.zadd(conf_param["persist_todo_q"], self.norm_uuid, getEpoch())
+            pipe.zadd(conf_param["persist_todo_q"], self.norm_uuid, self.hops)
 
         pipe.zrem(conf_param["perform_pend_q"], self.uuid)
         pipe.execute()
@@ -792,15 +790,17 @@ class SiteCrawler ():
         ## write content for this UUID via Persistence Layer
 
         red_cli.zadd(conf_param["persist_pend_q"], uuid, getEpoch())
-        b64_html = red_cli.hget(uuid, "b64_html")
+        hops, b64_html = red_cli.hmget(uuid, ["hops", "b64_html"])
 
         if b64_html:
-            print "\t".join([uuid, b64_html])
+            if debug(0):
+                printLog("PERSIST", [uuid, hops, len(b64_html)])
+
             self.db.sqlWrapper("INSERT INTO page VALUES(?, ?)", (uuid, b64_html))
             self.db.commit()
 
             pipe = red_cli.pipeline()
-            pipe.zadd(conf_param["analyze_todo_q"], uuid, getEpoch())
+            pipe.zadd(conf_param["analyze_todo_q"], uuid, hops)
             pipe.hdel(uuid, "b64_html")
             pipe.zrem(conf_param["persist_pend_q"], uuid)
             pipe.execute()
@@ -824,9 +824,7 @@ class SiteCrawler ():
     def taskAnalyze (self, uuid):
         ## store analyzed metadata in the graph database
 
-        if debug(0):
-            printLog("ANALYZE", [uuid])
-
+        red_cli.zadd(conf_param["analyze_pend_q"], uuid, getEpoch())
         page = app.findPage(uuid)
 
         meta_keys = ["status", "reason", "crawl_time", "norm_uri", "norm_uuid", "content_type", "date", "out_links"]
@@ -840,6 +838,9 @@ class SiteCrawler ():
         path_list, local_page, query_text = page.getPathQuery(norm_uri)
         self_path = "/".join([page.domain] + path_list + [""])
         parent_path = "/".join([page.domain] + path_list[0:len(path_list) - 1] + [""])
+
+        if debug(0):
+            printLog("ANALYZE", [uuid, norm_uuid, self_path])
 
         # persist metadata in this graph node
 

@@ -46,10 +46,10 @@ Usage:
 	# initialize Redis; run on server node...
 	cd PATH_TO_REDIS
 	nohup ./redis-server &
-	# you will probably want to config for "bgsave"
+	# you probably want to config so it does "BGSAVE"
 
 	# edit "config.tsv" for your settings...
-	# for example, Slinky is built to handle ~100 crawler threads
+	# e.g., Slinky handles ~100 crawler threads/node, but not in default config
 
 	# initialize CrawlQueue and PageStore; run from any node...
 	./src/slinky.py redis_host:port:db flush
@@ -58,12 +58,13 @@ Usage:
 	./src/slinky.py redis_host:port:db seed < urls.tsv
 
 	# perform a crawl; run this on each worker node...
-	./src/slinky.py redis_host:port:db perform
+	nohup ./src/slinky.py redis_host:port:db perform &
+	# will poll/sleep indefinitely; use "kill -9 PID" to terminate
 
-	# persist the crawled URI content; run from any node with attached storage...
-	./src/slinky.py redis_host:port:db persist
-	# will poll/sleep indefinitely, use "kill -2 PID" to terminate
+	# persist the crawled URI content; run from any reliable node with attached storage...
+	nohup ./src/slinky.py redis_host:port:db persist &
+	# will poll/sleep indefinitely; use "kill -2 PID" to close with no data loss
 
-	# analyze the crawled URI metadata; run from any node with attached storage...
-	./src/slinky.py redis_host:port:db analyze
-	# will poll/sleep indefinitely, use "kill -2 PID" to terminate
+	# analyze the crawled URI metadata; run from any reliable node with attached storage...
+	nohup ./src/slinky.py redis_host:port:db analyze &
+	# will poll/sleep indefinitely; use "kill -2 PID" to close with no data loss
