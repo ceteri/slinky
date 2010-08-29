@@ -13,18 +13,19 @@ common Text Analytics, implemented in Python.
 
   * uses Redis key/value store for both CrawlQueue and PageStore
   * uses SQLite to persist crawled URI content
-  * uses neo4j to persist crawled URI metadata
+  * uses Neo4j to persist and analyze URI metadata
   * uses Hadoop, R, Gephi for Text Analytics and Link Analytics
 
 This leverages a "Particle Cluster" design pattern. In contrast to
 MapReduce, a Particle Cluster is particularly well-suited for
 combinging highly reliable servers plus low-cost/unreliable VMs. In
-other words, you can take advantage of CPU + memory + I/O on ephemeral
-resources which might get taken away with notice. For example in AWS,
-the key/value store could run on a large EC2 node, while the
-distributed tasks run on Spot Instances -- based on pricing and
-availability. This pattern helps maximize throughput and reliability
-while minimizing the cost of scale-out for long-running jobs.
+other words, you can take advantage of CPU + memory + I/O on availably
+but relatively ephemeral resources -- which might get taken away
+without notice. For example in AWS, the key/value store could run on a
+large EC2 node, while the distributed tasks run on Spot Instances --
+based on pricing and availability. This pattern helps maximize
+throughput and reliability while minimizing the cost of scale-out for
+long-running jobs.
 
 
 Requires:
