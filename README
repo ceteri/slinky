@@ -16,20 +16,25 @@ common Text Analytics, implemented in Python.
   * uses neo4j to persist crawled URI metadata
   * uses Hadoop, R, Gephi for Text Analytics and Link Analytics
 
-In contrast to a pure MapReduce approach, this leverages a "particle
-cluster" design pattern, which is particularly well-suited for
-combinging highly reliable servers plus low-cost/unreliable VMs. For
-example in AWS, the key/value store could run on a large EC2 node,
-while the distributed tasks run on Spot Instances -- based on pricing
-and availability. This pattern helps maximize throughput and
-reliability while minimizing the cost of scale-out for long-running
-jobs.
+This leverages a "Particle Cluster" design pattern. In contrast to
+MapReduce, a Particle Cluster is particularly well-suited for
+combinging highly reliable servers plus low-cost/unreliable VMs. In
+other words, you can take advantage of CPU + memory + I/O on ephemeral
+resources which might get taken away with notice. For example in AWS,
+the key/value store could run on a large EC2 node, while the
+distributed tasks run on Spot Instances -- based on pricing and
+availability. This pattern helps maximize throughput and reliability
+while minimizing the cost of scale-out for long-running jobs.
+
 
 Requires:
 	http://github.com/andymccurdy/redis-py
 	http://www.crummy.com/software/BeautifulSoup/
 	http://henry.precheur.org/python/rfc3339
 	http://www.sqlite.org/download.html
+	http://neo4j.org/download/
+	http://components.neo4j.org/neo4j.py/
+	http://jpype.sourceforge.net/
 
 Usage:
 	# initialize CrawlQueue and PageStore; run from any node...
@@ -41,8 +46,10 @@ Usage:
 	# perform a crawl; run this on each worker node...
 	./src/slinky.py redis_host:port:db perform
 
-	# persist the crawled content; run this on Redis server...
+	# persist the crawled URI content; run from any node with attached storage...
 	./src/slinky.py redis_host:port:db persist
+	# will poll/sleep indefinitely, use "kill -2 PID" to terminate
 
-	# run MapReduce mapper on URI list for Analytics
-	./src/slinky.py redis_host:port:db mapper
+	# analyze the crawled URI metadata; run from any node with attached storage...
+	./src/slinky.py redis_host:port:db analyze
+	# will poll/sleep indefinitely, use "kill -2 PID" to terminate

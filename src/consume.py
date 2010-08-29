@@ -23,7 +23,9 @@ from threading import Condition, Lock, RLock, Thread
 from time import sleep
 
 import httplib
+import neo4j
 import re
+import signal
 import sqlite3
 import string
 import sys
@@ -43,6 +45,8 @@ red_lock = None
 CONF_PARAM_KEY = "conf"
 conf_param = {}
 conf_param["debug_level"] = "0"
+
+in_process_loop = False
 
 
 ######################################################################
@@ -81,6 +85,15 @@ def debug (level):
         return False
 
 
+def sigIntHandler (signum, frame):
+    ## SIGINT handler, to exit process loop for "persist" or "analyze"
+
+    global in_process_loop
+
+    in_process_loop = False
+    printLog("exiting, signal handler called with:", [signum])
+
+
 def calcPeriod (start):
     ## calculate a time period (millisec)
 
@@ -96,7 +109,7 @@ def getEpoch ():
 
 
 ######################################################################
-## lifecycle methods
+## ParticleCluster lifecycle methods
 
 def config ():
     ## put config params in key/value store, as a distrib cache
@@ -129,59 +142,18 @@ def flush (all):
         red_cli.delete(conf_param["perform_pend_q"])
 
 
-def putWhitelist ():
-    ## push white-listed domain rules into key/value store
-
-    for line in sys.stdin:
-        try:
-            line = line.strip()
-            [domain] = line.split("\t")
-
-            if debug(0):
-                printLog("WHITELIST", [domain])
-
-            red_cli.sadd(conf_param["white_list_key"], domain)
-
-        except ValueError, err:
-            sys.stderr.write("ValueError: %(err)s\n%(data)s\n" % {"err": str(err), "data": line})
-        except IndexError, err:
-            sys.stderr.write("IndexError: %(err)s\n%(data)s\n" % {"err": str(err), "data": line})
-
-
-def seed (crawler):
-    ## seed the Queue with root URIs as starting points
-
-    for line in sys.stdin:
-        try:
-            line = line.strip()
-            [hops, uri] = line.split("\t", 1)
-
-            page = WebPage(uri, int(hops))
-            page.hydrate()
-
-            if debug(0):
-                printLog("SEED", [page.uuid, page.uri, page.protocol, page.domain, page.hops])
-
-	    crawler.scheduleURI(page)
-
-        except ValueError, err:
-            sys.stderr.write("ValueError: %(err)s\n%(data)s\n" % {"err": str(err), "data": line})
-        except IndexError, err:
-            sys.stderr.write("IndexError: %(err)s\n%(data)s\n" % {"err": str(err), "data": line})
-
-
-def perform (crawler):
+def perform (app):
     ## draw fetch tasks from CrawlQueue, populate tasks into WorkerPool, run tasks in parallel
 
     if debug(0):
         printLog("START", [start_time])
 
     wp = WorkerPool(queue_len = 1, num_cons = int(conf_param["num_threads"]))
-    wp.run(crawler.runWorkerTask)
+    wp.run(app.runWorkerTask)
 
     # set up producer
 
-    producer = ProducerThread(wp.bounded_queue, crawler.feedWorkerPool)
+    producer = ProducerThread(wp.bounded_queue, app.feedWorkerPool)
     producer.name = "WorkerPool"
     producer.start()
 
@@ -191,17 +163,16 @@ def perform (crawler):
     producer.join()
 
 
-def persist ():
-    ## drain content from PageStore and persist it on disk
+def persist (app):
+    ## drain content from PageStore and persist it in a relational database
     ## NB: single-threaded
 
-    # create SQL table to store deflated HTML content
+    global in_process_loop
 
-    db = PersistanceLayer()
-    db.connect(conf_param["persist_db_uri"])
-    db.sqlWrapper("CREATE TABLE page (uuid TEXT, b64_html TEXT)", silent=True)
+    in_process_loop = True
+    app.initPersist()
 
-    while True:
+    while in_process_loop:
         zpop = red_cli.zrange(conf_param["persist_todo_q"], 0, 0)
 
         if len(zpop) < 1:
@@ -216,19 +187,38 @@ def persist ():
             uuid = zpop[0]
 
             if uuid:
-                red_cli.zadd(conf_param["persist_pend_q"], uuid, getEpoch())
-                b64_html = red_cli.hget(uuid, "b64_html")
+                app.taskPersist(uuid)
 
-                if b64_html:
-                    print "\t".join([uuid, b64_html])
-                    db.sqlWrapper("INSERT INTO page VALUES(?, ?)", (uuid, b64_html))
-                    db.commit()
+    app.stopPersist()
 
-                pipe = red_cli.pipeline()
-                pipe.zadd(conf_param["analyze_todo_q"], uuid, getEpoch())
-                pipe.hdel(uuid, "b64_html")
-                pipe.zrem(conf_param["persist_pend_q"], uuid)
-                pipe.execute()
+
+def analyze (app):
+    ## analyze metadata from PageStore and persist it in a graph database
+    ## NB: single-threaded
+
+    global in_process_loop
+
+    in_process_loop = True
+    app.initAnalyze()
+
+    while in_process_loop:
+        zpop = red_cli.zrange(conf_param["analyze_todo_q"], 0, 0)
+
+        if len(zpop) < 1:
+            # AnalyzeQueue is empty... so sleep now, then poll again later
+            sleep(float(conf_param["analyze_sleep"]))
+            continue
+        elif not red_cli.zrem(conf_param["analyze_todo_q"], zpop[0]):
+            # some other Redis client won a race condition
+            continue
+        else:
+            # got it! move URI to the "analyze pended" phased queue
+            uuid = zpop[0]
+
+            if uuid:
+                app.taskAnalyze(uuid)
+
+    app.stopAnalyze()
 
 
 ######################################################################
@@ -566,9 +556,9 @@ class WebPage ():
 
 
 ######################################################################
-## Crawler class definition
+## SiteCrawler class definition
 
-class Crawler ():
+class SiteCrawler ():
     """Site Crawler"""
 
     def __init__ (self):
@@ -576,9 +566,31 @@ class Crawler ():
 
 	self.domain_rules = {}
         self.white_list = red_cli.smembers(conf_param["white_list_key"])
-
         self.opener = urllib2.build_opener()
         self.opener.addheaders = [("User-agent", conf_param["user_agent"]), ("Accept-encoding", "gzip")]
+        self.db = None
+        self.graphdb = None
+        self.uuid_index = None
+        self.path_index = None
+
+
+    def putWhitelist (self):
+        ## push white-listed domain rules into key/value store
+
+        for line in sys.stdin:
+            try:
+                line = line.strip()
+                [domain] = line.split("\t")
+
+                if debug(0):
+                    printLog("WHITELIST", [domain])
+
+                red_cli.sadd(conf_param["white_list_key"], domain)
+
+            except ValueError, err:
+                sys.stderr.write("ValueError: %(err)s\n%(data)s\n" % {"err": str(err), "data": line})
+            except IndexError, err:
+                sys.stderr.write("IndexError: %(err)s\n%(data)s\n" % {"err": str(err), "data": line})
 
 
     def passWhitelist (self, page):
@@ -610,6 +622,28 @@ class Crawler ():
             printLog("ROBOTS", [is_allowed, page.uri])
 
         return is_allowed
+
+
+    def seed (self):
+        ## seed the Queue with root URIs as starting points
+
+        for line in sys.stdin:
+            try:
+                line = line.strip()
+                [hops, uri] = line.split("\t", 1)
+
+                page = WebPage(uri, int(hops))
+                page.hydrate()
+
+                if debug(0):
+                    printLog("SEED", [page.uuid, page.uri, page.protocol, page.domain, page.hops])
+
+                self.scheduleURI(page)
+
+            except ValueError, err:
+                sys.stderr.write("ValueError: %(err)s\n%(data)s\n" % {"err": str(err), "data": line})
+            except IndexError, err:
+                sys.stderr.write("IndexError: %(err)s\n%(data)s\n" % {"err": str(err), "data": line})
 
 
     def scheduleURI (self, page):
@@ -740,6 +774,123 @@ class Crawler ():
                     printLog("SCHED", [p_out.hops, p_out.uuid, p_out.uri])
 
                 self.scheduleURI(p_out)
+
+
+    def initPersist (self):
+        ## create SQL table to store deflated HTML content
+
+        self.db = PersistanceLayer()
+        self.db.connect(conf_param["persist_db_uri"])
+        self.db.sqlWrapper("CREATE TABLE page (uuid TEXT, b64_html TEXT)", silent=True)
+
+
+    def taskPersist (self, uuid):
+        ## write content for this UUID via Persistence Layer
+
+        red_cli.zadd(conf_param["persist_pend_q"], uuid, getEpoch())
+        b64_html = red_cli.hget(uuid, "b64_html")
+
+        if b64_html:
+            print "\t".join([uuid, b64_html])
+            self.db.sqlWrapper("INSERT INTO page VALUES(?, ?)", (uuid, b64_html))
+            self.db.commit()
+
+            pipe = red_cli.pipeline()
+            pipe.zadd(conf_param["analyze_todo_q"], uuid, getEpoch())
+            pipe.hdel(uuid, "b64_html")
+            pipe.zrem(conf_param["persist_pend_q"], uuid)
+            pipe.execute()
+
+
+    def stopPersist (self):
+        ## close the database in the Persistance Layer
+
+        if self.db:
+            self.db.close()
+
+
+    def initAnalyze (self):
+        ## create Neo4j DB + index to store analyzed metadata
+
+        self.graphdb = neo4j.NeoService(conf_param["analyze_db_uri"])
+        self.uuid_index = self.graphdb.index("uuid.idx", create=True) 
+        self.path_index = self.graphdb.index("path.idx", create=True) 
+
+
+    def taskAnalyze (self, uuid):
+        ## store analyzed metadata in the graph database
+
+        if debug(0):
+            printLog("ANALYZE", [uuid])
+
+        page = app.findPage(uuid)
+
+        meta_keys = ["status", "reason", "crawl_time", "norm_uri", "norm_uuid", "content_type", "date", "out_links"]
+        meta = red_cli.hmget(uuid, meta_keys)
+        status, reason, crawl_time, norm_uri, norm_uuid, content_type, date, out_links = meta
+
+        if not norm_uri:
+            norm_uri = page.uri
+            norm_uuid = page.uuid
+
+        path_list, local_page, query_text = page.getPathQuery(norm_uri)
+        self_path = "/".join([page.domain] + path_list + [""])
+        parent_path = "/".join([page.domain] + path_list[0:len(path_list) - 1] + [""])
+
+        # persist metadata in this graph node
+
+        with self.graphdb.transaction:
+            # lookup node based on UUID
+            page_node = self.uuid_index[norm_uuid]
+
+            if not page_node:
+                # create initially if it did not exist already
+                page_node = self.graphdb.node(uuid=norm_uuid)
+                self.uuid_index[uuid] = page_node
+
+            page_node["uuid"] = norm_uuid
+            page_node["hops"] = page.hops
+            page_node["uri"] = page.uri
+            page_node["protocol"] = page.protocol
+            page_node["domain"] = page.domain
+            page_node["norm_uri"] = norm_uri
+            page_node["status"] = status
+            page_node["reason"] = reason
+            page_node["crawl_time"] = crawl_time
+            page_node["content_type"] = content_type
+            page_node["date"] = date
+            page_node["path_len"] = len(path_list)
+            page_node["self_path"] = self_path
+            page_node["parent_path"] = parent_path
+            page_node["local_page"] = local_page
+            page_node["query_text"] = query_text
+
+            # represent the relationships with outbound links
+
+            for link_uuid in out_links:
+                link_node = self.uuid_index[link_uuid]
+
+                if not link_node:
+                    link_node = self.graphdb.node(uuid=link_uuid)
+                    self.uuid_index[link_uuid] = link_node
+
+                page_node.OUTBOUND(link_node)
+                link_node.INBOUND(page_node)
+
+                if not self.uuid_index[norm_uuid]:
+                    self.uuid_index[norm_uuid] = page_node
+
+                self.path_index.add(self_path, page_node)
+
+            # remove task from AnalyzeQueue
+
+            red_cli.zrem(conf_param["analyze_pend_q"], uuid)
+
+
+    def stopAnalyze (self):
+        ## close Neo4j graph database
+
+        self.graphdb.shutdown()
 
 
 ######################################################################
@@ -908,15 +1059,21 @@ if __name__ == "__main__":
             config()
         elif mode == "whitelist":
             # push white-listed domain rules into key/value store
-            putWhitelist()
+            app = SiteCrawler()
+            app.putWhitelist()
         elif mode == "seed":
             # seed the CrawlQueue with root URIs as starting points
-            c = Crawler()
-            seed(c)
+            app = SiteCrawler()
+            app.seed()
         elif mode == "perform":
             # consume from CrawlQueue via WorkerPool producer
-            c = Crawler()
-            perform(c)
+            app = SiteCrawler()
+            perform(app)
         elif mode == "persist":
-            # drain content from PageStore and persist it on disk
-            persist()
+            # drain content from PageStore and persist it in a relational database
+            app = SiteCrawler()
+            persist(app)
+        elif mode == "analyze":
+            # analyze metadata from PageStore and persist it in a graph database
+            app = SiteCrawler()
+            analyze(app)
