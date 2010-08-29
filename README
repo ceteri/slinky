@@ -48,6 +48,9 @@ Usage:
 	nohup ./redis-server &
 	# you will probably want to config for "bgsave"
 
+	# edit "config.tsv" for your settings...
+	# for example, Slinky is built to handle ~100 crawler threads
+
 	# initialize CrawlQueue and PageStore; run from any node...
 	./src/slinky.py redis_host:port:db flush
 	./src/slinky.py redis_host:port:db config < config.tsv
