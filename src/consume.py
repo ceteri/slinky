@@ -167,10 +167,12 @@ def persist (app):
     ## drain content from PageStore and persist it in a relational database
     ## NB: single-threaded
 
+    app.initPersist()
+
     global in_process_loop
 
     in_process_loop = True
-    app.initPersist()
+    signal.signal(signal.SIGINT, sigIntHandler)
 
     while in_process_loop:
         zpop = red_cli.zrange(conf_param["persist_todo_q"], 0, 0)
@@ -196,10 +198,12 @@ def analyze (app):
     ## analyze metadata from PageStore and persist it in a graph database
     ## NB: single-threaded
 
+    app.initAnalyze()
+
     global in_process_loop
 
     in_process_loop = True
-    app.initAnalyze()
+    signal.signal(signal.SIGINT, sigIntHandler)
 
     while in_process_loop:
         zpop = red_cli.zrange(conf_param["analyze_todo_q"], 0, 0)
