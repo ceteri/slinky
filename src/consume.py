@@ -853,6 +853,8 @@ class SiteCrawler ():
                 page_node = self.graphdb.node(uuid=norm_uuid)
                 self.uuid_index[uuid] = page_node
 
+            # update attributes for the page node
+
             page_node["uuid"] = norm_uuid
             page_node["hops"] = page.hops
             page_node["uri"] = page.uri
@@ -872,20 +874,23 @@ class SiteCrawler ():
 
             # represent the relationships with outbound links
 
-            for link_uuid in out_links:
-                link_node = self.uuid_index[link_uuid]
+            if out_links:
+                for link_uuid in out_links:
+                    link_node = self.uuid_index[link_uuid]
 
-                if not link_node:
-                    link_node = self.graphdb.node(uuid=link_uuid)
-                    self.uuid_index[link_uuid] = link_node
+                    if not link_node:
+                        link_node = self.graphdb.node(uuid=link_uuid)
+                        self.uuid_index[link_uuid] = link_node
 
-                page_node.OUTBOUND(link_node)
-                link_node.INBOUND(page_node)
+                    page_node.OUTBOUND(link_node)
+                    link_node.INBOUND(page_node)
 
-                if not self.uuid_index[norm_uuid]:
-                    self.uuid_index[norm_uuid] = page_node
+            # update Lucence indexes for "uuid" and "path"
 
-                self.path_index.add(self_path, page_node)
+            if not self.uuid_index[norm_uuid]:
+                self.uuid_index[norm_uuid] = page_node
+
+            self.path_index.add(self_path, page_node)
 
             # remove task from AnalyzeQueue
 
